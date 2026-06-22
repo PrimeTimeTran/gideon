@@ -1,0 +1,13 @@
+[package]
+name = "gideon"
+description = "Gideon helps developers discover hidden patterns in code."
+edition = "2024"
+version = "0.0.1"
+authors = ["Loi Tran"]
+license = "MIT OR Apache-2.0"
+
+documentation = "https://docs.rs/gideon"
+homepage = "https://kb-blog-primetimetran.vercel.app/"
+repository = "https://github.com/primetimetran/gideon"
+keywords = ["virtualization","visualization","filesystem", "development-tools", "os"]
+categories = ["virtualization","visualization","filesystem", "development-tools", "os"]
