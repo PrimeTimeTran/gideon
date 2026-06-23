@@ -1,13 +1,19 @@
 use anyhow::Error;
 use colored::*;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::{
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+    },
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen},
+};
 use ratatui::{
     DefaultTerminal, Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -38,6 +44,8 @@ pub struct UiState<'a> {
     pub agent_mode: &'a AgentMode,
     pub spinner_index: usize,
     pub cursor_visible: bool,
+    pub user_history: &'a [String],
+    pub ai_history: &'a [String],
 }
 
 struct Runner {
@@ -88,9 +96,8 @@ impl Runner {
                     Ok(true) => {}
                 }
             }
-            let frame_data = app.get_ui_data();
             self.terminal.draw(|f| {
-                render_ui(f, frame_data);
+                render_ui(f, &mut app);
             })?;
         }
         Ok(())
@@ -137,7 +144,13 @@ enum Role {
     AI,
 }
 
-struct App {
+pub struct App {
+    offset: i32,
+    ai_list_state: ListState,
+    user_list_state: ListState,
+    pub ai_area: Rect,
+    pub user_area: Rect,
+
     should_exit: Arc<AtomicBool>,
     cursor_visible: bool,
     last_cursor_toggle: std::time::Instant,
@@ -147,8 +160,10 @@ struct App {
     key_config: KeyConfig,
     input_buffer: String,
 
-    logger: Logger,
     history: Vec<String>,
+    user_history: Vec<String>,
+    ai_history: Vec<String>,
+    logger: Logger,
     logs: Vec<String>,
     messages: Vec<Message>,
 
@@ -168,16 +183,26 @@ impl App {
             .unwrap_or_default()
             .as_secs();
         let logger = Logger::new(session_id);
+        let (history_u, history_a) = logger.load_history();
+        let mut combined_history = history_u.clone();
+        combined_history.extend(history_a.clone());
         Self {
             tx,
             rx,
+            user_list_state: ListState::default(),
+            ai_list_state: ListState::default(),
             spinner_index: 0,
             tabs: vec!["Chat".into(), "Config".into(), "Logs".into()],
             active_tab: 0,
             should_exit,
             key_config: KeyConfig::default(),
             input_buffer: String::new(),
-            history: logger.load_history(),
+            user_history: history_u,
+            ai_history: history_a,
+            offset: 0,
+            ai_area: Rect::default(),
+            user_area: Rect::default(),
+            history: combined_history,
             logger,
             messages: Vec::new(),
             logs: Vec::new(),
@@ -244,8 +269,36 @@ impl App {
             self.last_cursor_toggle = std::time::Instant::now();
         }
     }
+
+    fn apply_scroll(state: &mut ListState, delta: i32) {
+        let offset = state.offset() as i32;
+        let new_offset = (offset + delta).max(0) as usize;
+        *state.offset_mut() = new_offset;
+    }
+
+    // 2. Now call it without &mut self
+    fn scroll_list(&mut self, mouse_pos: (u16, u16), delta: i32) {
+        if self.ai_area.contains(mouse_pos.into()) {
+            Self::apply_scroll(&mut self.ai_list_state, delta);
+        } else if self.user_area.contains(mouse_pos.into()) {
+            Self::apply_scroll(&mut self.user_list_state, delta);
+        }
+    }
     fn handle_events(&mut self) -> anyhow::Result<bool> {
-        if let Event::Key(key) = event::read()? {
+        let event = event::read()?;
+        if let Event::Mouse(mouse) = event {
+            dbg!("scrolling");
+            let pos = (mouse.column, mouse.row);
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.scroll_list(pos, -1);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll_list(pos, 1);
+                }
+                _ => {}
+            }
+        } else if let Event::Key(key) = event {
             match self.mode {
                 AppMode::Normal => match key.code {
                     KeyCode::Enter => self.handle_submit(),
@@ -303,6 +356,65 @@ impl App {
         }
         Ok(true)
     }
+    // fn handle_events(&mut self) -> anyhow::Result<bool> {
+    //     if let Event::Key(key) = event::read()? {
+    //         match self.mode {
+    //             AppMode::Normal => match key.code {
+    //                 KeyCode::Enter => self.handle_submit(),
+    //                 KeyCode::Char(':') if self.input_buffer.is_empty() => {
+    //                     self.input_buffer.push(':');
+    //                     self.mode = AppMode::Command;
+    //                 }
+    //                 KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+    //                     return Ok(false);
+    //                 }
+    //                 KeyCode::Backspace => {
+    //                     self.input_buffer.pop();
+    //                 }
+
+    //                 _ if key.code == self.key_config.next_tab.0
+    //                     && key.modifiers.contains(self.key_config.next_tab.1) =>
+    //                 {
+    //                     self.next_tab();
+    //                 }
+    //                 _ if key.code == self.key_config.prev_tab.0
+    //                     && key.modifiers.contains(self.key_config.prev_tab.1) =>
+    //                 {
+    //                     self.prev_tab();
+    //                 }
+
+    //                 KeyCode::Char(c) => {
+    //                     self.input_buffer.push(c);
+    //                 }
+
+    //                 _ => {}
+    //             },
+    //             AppMode::Command => match key.code {
+    //                 KeyCode::Enter => self.handle_submit(),
+    //                 KeyCode::Backspace => {
+    //                     self.input_buffer.pop();
+    //                     if self.input_buffer.is_empty() {
+    //                         self.mode = AppMode::Normal;
+    //                     }
+    //                 }
+    //                 KeyCode::Esc => {
+    //                     self.input_buffer.clear();
+    //                     self.mode = AppMode::Normal;
+    //                 }
+    //                 KeyCode::Char(c) => {
+    //                     self.input_buffer.push(c);
+    //                 }
+    //                 _ => {}
+    //             },
+    //             AppMode::LeaderPending => match key.code {
+    //                 KeyCode::Char('h') => self.history_mode(),
+    //                 _ => self.mode = AppMode::Normal,
+    //             },
+    //             _ => {}
+    //         }
+    //     }
+    //     Ok(true)
+    // }
     pub fn tick(&mut self) {
         self.update_cursor_blink();
 
@@ -343,6 +455,8 @@ impl App {
     }
     pub fn get_ui_data(&self) -> UiState<'_> {
         UiState {
+            user_history: &self.user_history,
+            ai_history: &self.ai_history,
             mode: &self.mode,
             history: &self.history,
             messages: &self.messages,
@@ -359,73 +473,171 @@ impl App {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let mut runner = Runner::new();
     let app = App::new(runner.should_exit.clone());
     runner.run(app).await?;
+    execute!(stdout, LeaveAlternateScreen, DisableMouseCapture)?;
     Ok(())
 }
 
-fn render_ui(f: &mut Frame, state: UiState) {
+pub fn render_ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Top: Tabs
-            Constraint::Min(1),    // Middle: Content (Conversation + History)
-            Constraint::Length(3), // Hints
-            Constraint::Length(3), // Input
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(3),
+            Constraint::Length(3),
         ])
         .split(f.area());
-
-    f.render_widget(
-        Tabs::new(state.tabs.iter().map(|s| s.as_str())) // Convert &String to &str
-            .select(state.active_tab)
-            .block(Block::default().borders(Borders::ALL).title(" Gideon ")),
-        chunks[0],
-    );
 
     let content_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[1]);
 
-    let msg_items: Vec<ListItem> = state
-        .messages
+    app.ai_area = content_chunks[0];
+    app.user_area = content_chunks[1];
+    let (ai_area, user_area) = (app.ai_area, app.user_area);
+
+    // 1. Render all widgets that require mutable app access FIRST
+    render_conversation(f, app, ai_area);
+    render_history(f, app, user_area);
+
+    // 2. Scope the snapshot so it is dropped after these widgets are drawn
+    {
+        let state = app.get_ui_data();
+        render_tabs(f, &state, chunks[0]);
+        f.render_widget(create_hint_widget(state.clone()), chunks[2]);
+        f.render_widget(create_input_widget(state), chunks[3]);
+    }
+}
+
+fn render_tabs(f: &mut Frame, state: &UiState, area: Rect) {
+    f.render_widget(
+        Tabs::new(state.tabs.iter().map(|s| s.as_str()))
+            .select(state.active_tab)
+            .block(Block::default().borders(Borders::ALL).title(" Gideon ")),
+        area,
+    );
+}
+// Note: Changed from UiState to &mut App to access the stateful list states
+fn render_conversation(f: &mut Frame, app: &mut App, area: Rect) {
+    use textwrap::{Options, wrap};
+    let width = area.width.saturating_sub(4) as usize;
+
+    let msg_items: Vec<ListItem> = app
+        .ai_history
         .iter()
-        .map(|m| {
-            ListItem::new(format!(
-                "{}: {}",
-                if m.role == Role::User { "You" } else { "AI" },
-                m.content
-            ))
+        .flat_map(|content| {
+            let wrapped_lines = wrap(content, Options::new(width));
+            wrapped_lines
+                .into_iter()
+                .map(|line| ListItem::new(line.into_owned()))
+                .chain(std::iter::once(ListItem::new("")))
         })
         .collect();
 
-    f.render_widget(
-        List::new(msg_items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Conversation "),
-        ),
-        content_chunks[0],
+    // let list = List::new(msg_items).block(
+    //     Block::default()
+    //         .borders(Borders::ALL)
+    //         .title(" AI Responses "),
+    // );
+
+    let list = List::new(msg_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" AI Responses "),
     );
-    render_history(f, state.clone(), content_chunks[1]);
-    f.render_widget(create_hint_widget(state.clone()), chunks[2]);
-    f.render_widget(create_input_widget(state), chunks[3]);
+
+    // CRITICAL: Use render_stateful_widget instead of render_widget
+    f.render_stateful_widget(list, area, &mut app.ai_list_state);
 }
 
-fn render_history(f: &mut Frame<'_>, state: UiState, chunks: Rect) {
-    let hist_items: Vec<ListItem> = state
-        .history
+fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
+    use textwrap::{Options, wrap};
+    let width = area.width.saturating_sub(4) as usize;
+
+    let hist_items: Vec<ListItem> = app
+        .user_history
         .iter()
-        .map(|s| ListItem::new(s.as_str()))
+        .flat_map(|content| {
+            let wrapped_lines = wrap(content, Options::new(width));
+            wrapped_lines
+                .into_iter()
+                .map(|line| ListItem::new(line.into_owned()))
+                .chain(std::iter::once(ListItem::new("")))
+        })
         .collect();
 
-    f.render_widget(
-        List::new(hist_items).block(Block::default().borders(Borders::ALL).title(" History ")),
-        chunks,
-    );
-}
+    let list = List::new(hist_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Your Prompts "),
+        )
+        .highlight_symbol(">> ");
 
+    f.render_stateful_widget(list, area, &mut app.user_list_state);
+}
+// fn render_conversation(f: &mut Frame, state: &UiState, area: Rect) {
+//     use textwrap::{Options, wrap};
+
+//     let width = area.width.saturating_sub(4) as usize;
+
+//     // Now directly using state.ai_history
+//     let msg_items: Vec<ListItem> = state
+//         .ai_history
+//         .iter()
+//         .flat_map(|content| {
+//             let wrapped_lines = wrap(content, Options::new(width));
+//             wrapped_lines
+//                 .into_iter()
+//                 .map(|line| ListItem::new(line.into_owned()))
+//                 .chain(std::iter::once(ListItem::new("")))
+//         })
+//         .collect();
+
+//     f.render_widget(
+//         List::new(msg_items).block(
+//             Block::default()
+//                 .borders(Borders::ALL)
+//                 .title(" AI Responses "),
+//         ),
+//         area,
+//     );
+// }
+
+// fn render_history(f: &mut Frame, state: &UiState, area: Rect) {
+//     use textwrap::{Options, wrap};
+//     let width = area.width.saturating_sub(4) as usize;
+
+//     // Now directly using state.user_history
+//     let hist_items: Vec<ListItem> = state
+//         .user_history
+//         .iter()
+//         .flat_map(|content| {
+//             let wrapped_lines = wrap(content, Options::new(width));
+//             wrapped_lines
+//                 .into_iter()
+//                 .map(|line| ListItem::new(line.into_owned()))
+//                 .chain(std::iter::once(ListItem::new("")))
+//         })
+//         .collect();
+
+//     f.render_widget(
+//         List::new(hist_items)
+//             .block(
+//                 Block::default()
+//                     .borders(Borders::ALL)
+//                     .title(" Your Prompts "),
+//             )
+//             .highlight_symbol(">> "),
+//         area,
+//     );
+// }
 fn create_hint_widget(state: UiState<'_>) -> Paragraph<'_> {
     let hint_text = match state.mode {
         AppMode::Normal => "Esc to Quit | I to Edit | Enter to Send",
@@ -578,6 +790,14 @@ impl Drop for TerminalGuard {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct HistoryEntry {
+    session: u64,
+    role: String,
+    content: String,
+    timestamp: u64,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 struct LogEntry {
     session: u64,
@@ -595,7 +815,7 @@ impl Logger {
     fn new(session_id: u64) -> Self {
         Self { session_id }
     }
-    fn log_to_file(&self, role: &str, content: &str) -> io::Result<()> {
+    pub fn log_to_file(&self, role: &str, content: &str) -> io::Result<()> {
         let entry = LogEntry {
             session: self.session_id,
             role: role.to_string(),
@@ -611,26 +831,40 @@ impl Logger {
             .append(true)
             .open("chat_log.jsonl")?;
 
+        // Serialize the unified struct
         let json = serde_json::to_string(&entry).map_err(io::Error::other)?;
         writeln!(file, "{}", json)?;
         Ok(())
     }
-    fn load_history(&self) -> Vec<String> {
-        let path = "history.txt";
+
+    pub fn load_history(&self) -> (Vec<String>, Vec<String>) {
+        let path = "chat_log.jsonl";
         if !Path::new(path).exists() {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
+
+        let mut user_h = Vec::new();
+        let mut ai_h = Vec::new();
 
         let file = match File::open(path) {
             Ok(f) => f,
-            Err(e) => {
-                eprintln!("Failed to open history file: {}", e);
-                return Vec::new();
-            }
+            Err(_) => return (Vec::new(), Vec::new()),
         };
 
         let reader = BufReader::new(file);
-        reader.lines().map_while(Result::ok).collect()
+        for line in reader.lines() {
+            if let Ok(l) = line {
+                if let Ok(entry) = serde_json::from_str::<LogEntry>(&l) {
+                    match entry.role.as_str() {
+                        "user" => user_h.push(entry.content),
+                        "ai" => ai_h.push(entry.content),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        (user_h, ai_h)
     }
 }
 

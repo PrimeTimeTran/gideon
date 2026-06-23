@@ -3,3 +3,6 @@
 {"session":1782210214,"role":"user","content":"how big is the sun?","timestamp":1782210233}
 {"session":1782210214,"role":"ai","content":"The Sun's diameter is approximately 1.39 million kilometers (about 864,000 miles), making it about 109 times wider than Earth.","timestamp":1782210246}
 {"session":1782210214,"role":"user","content":":q","timestamp":1782210578}
+{"session":1782216019,"role":"user","content":"what is 1+1?","timestamp":1782216024}
+{"session":1782216019,"role":"ai","content":"2","timestamp":1782216031}
+{"session":1782216019,"role":"user","content":"which state was the 35?","timestamp":1782216044}
