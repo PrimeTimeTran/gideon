@@ -164,3 +164,5 @@ impl GideonOutput {
 //         }
 //     }
 // }
+
+// terminal.draw(|f| draw_ui(f, &app))?;

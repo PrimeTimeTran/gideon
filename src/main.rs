@@ -11,6 +11,7 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::fs::{File, OpenOptions};
 use std::{
     io::{self, BufRead, BufReader, Stdout, Write},
     path::Path,
@@ -60,19 +61,21 @@ enum Role {
     User,
     AI,
 }
+
 struct App {
-    should_quit: Arc<AtomicBool>,
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+    should_exit: Arc<AtomicBool>,
     cursor_visible: bool,
     last_cursor_toggle: std::time::Instant,
-    logger: Logger,
     tabs: Vec<String>,
     active_tab: usize,
     key_config: KeyConfig,
     input_buffer: String,
+
+    logger: Logger,
     history: Vec<String>,
-    messages: Vec<Message>,
     logs: Vec<String>,
+    messages: Vec<Message>,
+
     mode: AppMode,
     agent_mode: AgentMode,
     tx: Sender<anyhow::Result<String>>,
@@ -81,39 +84,24 @@ struct App {
 }
 
 impl App {
-    pub fn should_quit(&self) -> bool {
-        self.should_quit.load(Ordering::SeqCst)
-    }
-    fn new() -> Self {
-        let should_quit: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-        let q = should_quit.clone();
-        tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            q.store(true, Ordering::SeqCst);
-        });
-
-        std::panic::set_hook(Box::new(|info| {
-            ratatui::restore();
-            eprintln!("Panic occurred: {:?}", info);
-        }));
-        let terminal = ratatui::init();
+    fn new(should_exit: Arc<AtomicBool>) -> Self {
         let (tx, rx) = mpsc::channel();
         let session_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        let logger = Logger::new(session_id);
         Self {
             tx,
             rx,
-            terminal,
-            logger: Logger::new(session_id),
             spinner_index: 0,
             tabs: vec!["Chat".into(), "Config".into(), "Logs".into()],
             active_tab: 0,
-            should_quit,
+            should_exit,
             key_config: KeyConfig::default(),
             input_buffer: String::new(),
-            history: load_history(),
+            history: logger.load_history(),
+            logger,
             messages: Vec::new(),
             logs: Vec::new(),
             mode: AppMode::Normal,
@@ -132,9 +120,11 @@ impl App {
     fn perform_special_quit(&mut self) {
         self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
     }
+
     fn history_mode(&mut self) {
         self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
     }
+
     fn exit(&self) {
         println!("Exiting");
         ratatui::restore();
@@ -143,12 +133,11 @@ impl App {
     }
     fn handle_command(&mut self, input: &str) {
         match input {
-            ":q" => self.should_quit = Arc::new(AtomicBool::new(true)),
+            ":q" => self.should_exit = Arc::new(AtomicBool::new(true)),
             ":history" => self.history_mode(),
             _ => self.logs.push("Unknown command".to_string()),
         }
     }
-
     fn handle_submit(&mut self) {
         if self.input_buffer.is_empty() {
             return;
@@ -242,23 +231,26 @@ impl App {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let should_quit = Arc::new(AtomicBool::new(false));
-    let q = should_quit.clone();
-
+    let should_exit = Arc::new(AtomicBool::new(false));
+    let q = should_exit.clone();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.unwrap();
+        let _ = tokio::signal::ctrl_c().await;
         q.store(true, Ordering::SeqCst);
     });
+
     std::panic::set_hook(Box::new(|info| {
         ratatui::restore();
         eprintln!("Panic occurred: {:?}", info);
     }));
-    #[allow(clippy::let_unit_value)]
+
     let _guard = TerminalGuard;
     let mut terminal = ratatui::init();
-    let mut app = App::new();
+    let mut app = App::new(should_exit.clone());
 
     loop {
+        if app.should_exit.load(Ordering::SeqCst) {
+            break;
+        }
         app.update_cursor_blink();
         if app.agent_mode == AgentMode::Thinking {
             app.spinner_index += 1;
@@ -294,10 +286,6 @@ async fn main() -> io::Result<()> {
                     app.logs.push(format!("AI Error: {}", e));
                 }
             }
-        }
-        while !app.should_quit() {
-            app.handle_events()?;
-            // terminal.draw()?;
         }
         terminal.draw(|f| draw_ui(f, &app))?;
     }
@@ -366,6 +354,22 @@ fn render_history(f: &mut Frame<'_>, app: &App, chunks: Rect) {
     );
 }
 
+fn create_hint_widget(app: &App) -> Paragraph<'_> {
+    let hint_text = match app.mode {
+        AppMode::Normal => "Esc to Quit | I to Edit | Enter to Send",
+        AppMode::Editing => "Esc to Normal | Ctrl+S to Save",
+        _ => "hi",
+    };
+
+    Paragraph::new(hint_text)
+        .block(Block::default().borders(Borders::ALL).title(" Hints "))
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::DIM),
+        )
+        .alignment(Alignment::Center)
+}
 fn create_input_widget(app: &App) -> Paragraph<'_> {
     let buffer = &app.input_buffer;
     let spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -400,20 +404,12 @@ fn create_input_widget(app: &App) -> Paragraph<'_> {
     Paragraph::new(line).block(Block::default().borders(Borders::ALL).title(" Input "))
 }
 
-// fn handle_command(app: &mut App, input: &str) {
-//     match input {
-//         ":q" => app.should_quit = true,
-//         ":history" => app.history_mode(),
-//         _ => app.logs.push("Unknown command".to_string()),
-//     }
-// }
-
 #[derive(Deserialize, Debug)]
 struct OllamaResponse {
-    model: String,
-    created_at: String,
-    response: String,
     done: bool,
+    model: String,
+    response: String,
+    created_at: String,
 }
 
 async fn run_agent_loop(user_input: String) -> anyhow::Result<()> {
@@ -511,25 +507,6 @@ impl Drop for TerminalGuard {
     }
 }
 
-use std::fs::{File, OpenOptions};
-
-fn load_history() -> Vec<String> {
-    let path = "history.txt";
-    if !Path::new(path).exists() {
-        return Vec::new();
-    }
-
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("Failed to open history file: {}", e);
-            return Vec::new();
-        }
-    };
-
-    let reader = BufReader::new(file);
-    reader.lines().map_while(Result::ok).collect()
-}
 #[derive(Serialize, Deserialize, Clone)]
 struct LogEntry {
     session: u64,
@@ -541,6 +518,7 @@ struct LogEntry {
 struct Logger {
     session_id: u64,
 }
+
 impl Logger {
     fn new(session_id: u64) -> Self {
         Self { session_id }
@@ -565,24 +543,23 @@ impl Logger {
         writeln!(file, "{}", json)?;
         Ok(())
     }
-}
+    fn load_history(&self) -> Vec<String> {
+        let path = "history.txt";
+        if !Path::new(path).exists() {
+            return Vec::new();
+        }
 
-fn create_hint_widget(app: &App) -> Paragraph<'_> {
-    // Define hints based on state
-    let hint_text = match app.mode {
-        AppMode::Normal => "Esc to Quit | I to Edit | Enter to Send",
-        AppMode::Editing => "Esc to Normal | Ctrl+S to Save",
-        _ => "hi",
-    };
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("Failed to open history file: {}", e);
+                return Vec::new();
+            }
+        };
 
-    Paragraph::new(hint_text)
-        .block(Block::default().borders(Borders::ALL).title(" Hints "))
-        .style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::DIM),
-        )
-        .alignment(Alignment::Center)
+        let reader = BufReader::new(file);
+        reader.lines().map_while(Result::ok).collect()
+    }
 }
 
 #[derive(serde::Deserialize)]
