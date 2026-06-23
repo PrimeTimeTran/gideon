@@ -11,11 +11,12 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::fs::{File, OpenOptions};
 use std::{
+    fs::{File, OpenOptions},
     io::{self, BufRead, BufReader, Stdout, Write},
     path::Path,
     rc::Rc,
+    sync::Mutex,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -23,20 +24,94 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::broadcast;
 
-enum AppMode {
+#[derive(Clone)]
+pub struct UiState<'a> {
+    pub messages: &'a [Message],
+    pub mode: &'a AppMode,
+    pub history: &'a [String],
+    pub logs: &'a [String],
+    pub tabs: &'a [String],
+    pub active_tab: usize,
+    pub input_buffer: &'a str,
+    pub agent_mode: &'a AgentMode,
+    pub spinner_index: usize,
+    pub cursor_visible: bool,
+}
+
+struct Runner {
+    pub terminal: Terminal<CrosstermBackend<Stdout>>,
+    _guard: TerminalGuard,
+    should_exit: Arc<AtomicBool>,
+}
+
+impl Runner {
+    pub fn new() -> Self {
+        let should_exit = Arc::new(AtomicBool::new(false));
+        let q = should_exit.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            q.store(true, Ordering::SeqCst);
+        });
+        std::panic::set_hook(Box::new(|info| {
+            ratatui::restore();
+            eprintln!("Panic occurred: {:?}", info);
+        }));
+
+        let _guard: TerminalGuard = TerminalGuard;
+        let terminal = ratatui::init();
+        Self {
+            terminal,
+            _guard,
+            should_exit: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub async fn run(&mut self, mut app: App) -> io::Result<()> {
+        let _guard = &self._guard;
+        loop {
+            if self.should_exit.load(Ordering::SeqCst) || app.should_exit.load(Ordering::SeqCst) {
+                break;
+            }
+            app.tick();
+            if event::poll(std::time::Duration::from_millis(150))? {
+                match app.handle_events() {
+                    Ok(false) => {
+                        app.exit();
+                        break;
+                    }
+                    Err(_) => {
+                        app.exit();
+                        break;
+                    }
+                    Ok(true) => {}
+                }
+            }
+            let frame_data = app.get_ui_data();
+            self.terminal.draw(|f| {
+                render_ui(f, frame_data);
+            })?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub enum AppMode {
     Normal,
     Command,
     Editing,
     LeaderPending,
 }
-#[derive(PartialEq)]
-enum AgentMode {
+#[derive(PartialEq, Clone)]
+pub enum AgentMode {
     Waiting,
     Thinking,
     Error(String),
 }
 
+#[derive(Clone)]
 struct KeyConfig {
     next_tab: (KeyCode, KeyModifiers),
     prev_tab: (KeyCode, KeyModifiers),
@@ -51,12 +126,12 @@ impl Default for KeyConfig {
     }
 }
 
-#[derive(PartialEq)]
-struct Message {
+#[derive(PartialEq, Clone)]
+pub struct Message {
     role: Role,
     content: String,
 }
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone)]
 enum Role {
     User,
     AI,
@@ -66,6 +141,7 @@ struct App {
     should_exit: Arc<AtomicBool>,
     cursor_visible: bool,
     last_cursor_toggle: std::time::Instant,
+
     tabs: Vec<String>,
     active_tab: usize,
     key_config: KeyConfig,
@@ -78,14 +154,15 @@ struct App {
 
     mode: AppMode,
     agent_mode: AgentMode,
-    tx: Sender<anyhow::Result<String>>,
-    rx: Receiver<anyhow::Result<String>>,
+    pub tx: broadcast::Sender<Result<String, String>>,
+    pub rx: broadcast::Receiver<Result<String, String>>,
     spinner_index: usize,
 }
 
 impl App {
     fn new(should_exit: Arc<AtomicBool>) -> Self {
-        let (tx, rx) = mpsc::channel();
+        let (tx, _) = broadcast::channel::<Result<String, String>>(16);
+        let rx = tx.subscribe();
         let session_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -155,11 +232,10 @@ impl App {
 
             let tx = self.tx.clone();
             tokio::spawn(async move {
-                let result = prompt_ollama(input).await;
+                let result = prompt_ollama(input).await.map_err(|e| e.to_string());
                 let _ = tx.send(result);
             });
         }
-
         self.mode = AppMode::Normal;
     }
     fn update_cursor_blink(&mut self) {
@@ -227,73 +303,69 @@ impl App {
         }
         Ok(true)
     }
+    pub fn tick(&mut self) {
+        self.update_cursor_blink();
+
+        if self.agent_mode == AgentMode::Thinking {
+            self.spinner_index += 1;
+        }
+
+        match self.rx.try_recv() {
+            Ok(result) => {
+                self.agent_mode = AgentMode::Waiting;
+
+                match result {
+                    Ok(answer) => {
+                        let _ = self.logger.log_to_file("ai", &answer);
+
+                        self.messages.push(Message {
+                            role: Role::AI,
+                            content: answer,
+                        });
+                    }
+                    Err(e) => {
+                        self.agent_mode = AgentMode::Error(e.to_string());
+                        self.logs.push(format!("AI Error: {}", e));
+                    }
+                }
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                // No message, nothing to do
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                // Optional: Handle if we missed messages
+                self.logs.push(format!("Warning: Missed {} messages", n));
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                // Channel closed, might want to handle this
+            }
+        }
+    }
+    pub fn get_ui_data(&self) -> UiState<'_> {
+        UiState {
+            mode: &self.mode,
+            history: &self.history,
+            messages: &self.messages,
+            logs: &self.logs,
+            tabs: &self.tabs,
+            active_tab: self.active_tab,
+            input_buffer: &self.input_buffer,
+            agent_mode: &self.agent_mode,
+            spinner_index: self.spinner_index,
+            cursor_visible: self.cursor_visible,
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let should_exit = Arc::new(AtomicBool::new(false));
-    let q = should_exit.clone();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        q.store(true, Ordering::SeqCst);
-    });
-
-    std::panic::set_hook(Box::new(|info| {
-        ratatui::restore();
-        eprintln!("Panic occurred: {:?}", info);
-    }));
-
-    let _guard = TerminalGuard;
-    let mut terminal = ratatui::init();
-    let mut app = App::new(should_exit.clone());
-
-    loop {
-        if app.should_exit.load(Ordering::SeqCst) {
-            break;
-        }
-        app.update_cursor_blink();
-        if app.agent_mode == AgentMode::Thinking {
-            app.spinner_index += 1;
-        }
-
-        if event::poll(std::time::Duration::from_millis(150))? {
-            match app.handle_events() {
-                Ok(false) => {
-                    app.exit();
-                    break;
-                }
-                Err(_) => {
-                    app.exit();
-                    break;
-                }
-                Ok(true) => {}
-            }
-        }
-        if let Ok(result) = app.rx.try_recv() {
-            app.agent_mode = AgentMode::Waiting;
-
-            match result {
-                Ok(answer) => {
-                    let _ = app.logger.log_to_file("ai", &answer);
-
-                    app.messages.push(Message {
-                        role: Role::AI,
-                        content: answer,
-                    });
-                }
-                Err(e) => {
-                    app.agent_mode = AgentMode::Error(e.to_string());
-                    app.logs.push(format!("AI Error: {}", e));
-                }
-            }
-        }
-        terminal.draw(|f| draw_ui(f, &app))?;
-    }
-
+    let mut runner = Runner::new();
+    let app = App::new(runner.should_exit.clone());
+    runner.run(app).await?;
     Ok(())
 }
 
-fn draw_ui(f: &mut Frame, app: &App) {
+fn render_ui(f: &mut Frame, state: UiState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -305,8 +377,8 @@ fn draw_ui(f: &mut Frame, app: &App) {
         .split(f.area());
 
     f.render_widget(
-        Tabs::new(app.tabs.clone())
-            .select(app.active_tab)
+        Tabs::new(state.tabs.iter().map(|s| s.as_str())) // Convert &String to &str
+            .select(state.active_tab)
             .block(Block::default().borders(Borders::ALL).title(" Gideon ")),
         chunks[0],
     );
@@ -316,7 +388,7 @@ fn draw_ui(f: &mut Frame, app: &App) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[1]);
 
-    let msg_items: Vec<ListItem> = app
+    let msg_items: Vec<ListItem> = state
         .messages
         .iter()
         .map(|m| {
@@ -336,13 +408,13 @@ fn draw_ui(f: &mut Frame, app: &App) {
         ),
         content_chunks[0],
     );
-    render_history(f, app, content_chunks[1]);
-    f.render_widget(create_hint_widget(app), chunks[2]);
-    f.render_widget(create_input_widget(app), chunks[3]);
+    render_history(f, state.clone(), content_chunks[1]);
+    f.render_widget(create_hint_widget(state.clone()), chunks[2]);
+    f.render_widget(create_input_widget(state), chunks[3]);
 }
 
-fn render_history(f: &mut Frame<'_>, app: &App, chunks: Rect) {
-    let hist_items: Vec<ListItem> = app
+fn render_history(f: &mut Frame<'_>, state: UiState, chunks: Rect) {
+    let hist_items: Vec<ListItem> = state
         .history
         .iter()
         .map(|s| ListItem::new(s.as_str()))
@@ -354,8 +426,8 @@ fn render_history(f: &mut Frame<'_>, app: &App, chunks: Rect) {
     );
 }
 
-fn create_hint_widget(app: &App) -> Paragraph<'_> {
-    let hint_text = match app.mode {
+fn create_hint_widget(state: UiState<'_>) -> Paragraph<'_> {
+    let hint_text = match state.mode {
         AppMode::Normal => "Esc to Quit | I to Edit | Enter to Send",
         AppMode::Editing => "Esc to Normal | Ctrl+S to Save",
         _ => "hi",
@@ -370,18 +442,17 @@ fn create_hint_widget(app: &App) -> Paragraph<'_> {
         )
         .alignment(Alignment::Center)
 }
-fn create_input_widget(app: &App) -> Paragraph<'_> {
-    let buffer = &app.input_buffer;
+fn create_input_widget<'a>(state: UiState) -> Paragraph<'a> {
     let spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let prefix = if app.agent_mode == AgentMode::Thinking {
-        spinner_chars[app.spinner_index % spinner_chars.len()].to_string()
-    } else if !buffer.is_empty()
+    let prefix = if state.agent_mode == &AgentMode::Thinking {
+        spinner_chars[state.spinner_index % spinner_chars.len()].to_string()
+    } else if !state.input_buffer.is_empty()
         && matches!(
-            buffer.chars().next().unwrap(),
+            state.input_buffer.chars().next().unwrap(),
             ':' | '!' | '/' | '.' | '#' | '@'
         )
     {
-        buffer.chars().next().unwrap().to_string()
+        state.input_buffer.chars().next().unwrap().to_string()
     } else {
         ">".to_string()
     };
@@ -390,14 +461,14 @@ fn create_input_widget(app: &App) -> Paragraph<'_> {
         Style::default().fg(Color::Yellow).bold(),
     )];
 
-    let content = if app.agent_mode == AgentMode::Thinking {
+    let content = if state.agent_mode == &AgentMode::Thinking {
         "Thinking...".to_string()
     } else {
-        app.input_buffer.clone()
+        state.input_buffer.to_string()
     };
 
     spans.push(Span::styled(content, Style::default().fg(Color::White)));
-    if app.agent_mode != AgentMode::Thinking && app.cursor_visible {
+    if state.agent_mode != &AgentMode::Thinking && state.cursor_visible {
         spans.push(Span::styled("_", Style::default().fg(Color::Yellow).bold()));
     }
     let line = Line::from(spans);
@@ -434,7 +505,7 @@ async fn run_agent_loop(user_input: String) -> anyhow::Result<()> {
             // }
         },
         Err(e) => {
-            // CRITICAL: Handle cases where the LLM talks instead of returning JSON
+            // TODO: Handle cases where the LLM talks instead of returning JSON
             eprintln!(
                 "Failed to parse command from AI: {}. Raw text: {}",
                 e, json_content
@@ -515,6 +586,7 @@ struct LogEntry {
     timestamp: u64,
 }
 
+#[derive(Clone)]
 struct Logger {
     session_id: u64,
 }
