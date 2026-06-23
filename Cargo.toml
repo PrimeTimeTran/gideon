@@ -11,3 +11,15 @@ homepage = "https://kb-blog-primetimetran.vercel.app/"
 repository = "https://github.com/primetimetran/gideon"
 keywords = ["virtualization","visualization","filesystem", "development-tools", "os"]
 categories = ["virtualization","visualization","filesystem", "development-tools", "os"]
+
+[dependencies]
+cli = { path = "../cli" }
+clap = "4.6.1"
+tokio = "1.52.3"
+async-trait = "0.1.89"
+
+rmcp = { version = "1.7.0", features = ["client", "macros", "transport-child-process", "transport-io", "transport-streamable-http-client-unix-socket"] }
+serde = "1.0.228"
+anyhow = "1.0.102"
+jsonschema = "0.46.5"
+schemars = "1.2.1"
