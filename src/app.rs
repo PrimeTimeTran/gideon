@@ -1,6 +1,11 @@
-use crate::ai::run_agent_loop;
-use crate::ui::{UiState, render_ui};
+// src/app.rs
+use crate::{
+    ai::{AgentStatus, prompt_ollama, run_agent_loop},
+    logger::Logger,
+    ui::{UiState, render_ui},
+};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
+
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, widgets::ListState};
 use std::{
     io::{self, Stdout, Write},
@@ -10,7 +15,6 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::broadcast;
 
 pub struct Runner {
     pub terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -84,7 +88,7 @@ pub enum AgentMode {
 }
 
 #[derive(Clone)]
-struct KeyConfig {
+pub struct KeyConfig {
     next_tab: (KeyCode, KeyModifiers),
     prev_tab: (KeyCode, KeyModifiers),
 }
@@ -135,15 +139,14 @@ pub struct App {
 
     pub mode: AppMode,
     pub agent_mode: AgentMode,
-    pub tx: broadcast::Sender<Result<String, String>>,
-    pub rx: broadcast::Receiver<Result<String, String>>,
+    pub tx: tokio::sync::mpsc::UnboundedSender<AgentStatus>,
+    pub rx: tokio::sync::mpsc::UnboundedReceiver<AgentStatus>,
     pub spinner_index: usize,
 }
 
 impl App {
     pub fn new(should_exit: Arc<AtomicBool>) -> Self {
-        let (tx, _) = broadcast::channel::<Result<String, String>>(16);
-        let rx = tx.subscribe();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentStatus>();
         let session_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -220,7 +223,6 @@ impl App {
 
         if input.starts_with(':') {
             self.handle_command(&input);
-            // Inside your input handling logic:
         } else {
             self.agent_mode = AgentMode::Thinking;
             let tx = self.tx.clone();
@@ -228,12 +230,16 @@ impl App {
             let input_text = input.clone();
 
             tokio::spawn(async move {
-                match run_agent_loop(input_text).await {
+                match run_agent_loop(input_text, tx.clone()).await {
                     Ok(_) => {
-                        let _ = tx.send(Ok("Action executed successfully.".to_string()));
+                        // Signal completion to the UI
+                        // let _ = tx.send(AgentStatus::Finished(
+                        //     "Action executed successfully.".to_string(),
+                        // ));
                     }
                     Err(e) => {
-                        let _ = tx.send(Err(e.to_string()));
+                        // Signal error to the UI
+                        let _ = tx.send(AgentStatus::Error(e.to_string()));
                     }
                 }
             });
@@ -369,38 +375,56 @@ impl App {
             self.spinner_index += 1;
         }
 
-        match self.rx.try_recv() {
-            Ok(result) => {
-                self.agent_mode = AgentMode::Waiting;
-
-                match result {
-                    Ok(answer) => {
-                        let _ = self.logger.log_to_file("ai", &answer);
-
-                        self.messages.push(Message {
-                            role: Role::AI,
-                            content: answer.clone(),
-                        });
-                        self.ai_history.push(answer);
-                        // self.scroll_to_bottom();
-                    }
-                    Err(e) => {
-                        self.agent_mode = AgentMode::Error(e.to_string());
-                        self.logs.push(format!("AI Error: {}", e));
-                    }
+        while let Ok(status) = self.rx.try_recv() {
+            match status {
+                AgentStatus::Thinking => {
+                    self.agent_mode = AgentMode::Thinking;
+                }
+                AgentStatus::Working(msg) => {
+                    self.logs.push(msg);
+                }
+                AgentStatus::Finished(answer) => {
+                    let _ = self.logger.log_to_file("ai", &answer);
+                    self.agent_mode = AgentMode::Waiting;
+                    self.ai_history.push(answer);
+                }
+                AgentStatus::Error(e) => {
+                    self.agent_mode = AgentMode::Error(e);
                 }
             }
-            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
-                // No message, nothing to do
-            }
-            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
-                // Optional: Handle if we missed messages
-                self.logs.push(format!("Warning: Missed {} messages", n));
-            }
-            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
-                // Channel closed, might want to handle this
-            }
         }
+
+        // match self.rx.try_recv() {
+        //     Ok(result) => {
+        //         self.agent_mode = AgentMode::Waiting;
+
+        //         match result {
+        //             Ok(answer) => {
+        //                 let _ = self.logger.log_to_file("ai", &answer);
+
+        //                 self.messages.push(Message {
+        //                     role: Role::AI,
+        //                     content: answer.clone(),
+        //                 });
+        //                 self.ai_history.push(answer);
+        //             }
+        //             Err(e) => {
+        //                 self.agent_mode = AgentMode::Error(e.to_string());
+        //                 self.logs.push(format!("AI Error: {}", e));
+        //             }
+        //         }
+        //     }
+        //     Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+        //         // No message, nothing to do
+        //     }
+        //     Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+        //         // Optional: Handle if we missed messages
+        //         self.logs.push(format!("Warning: Missed {} messages", n));
+        //     }
+        //     Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+        //         // Channel closed, might want to handle this
+        //     }
+        // }
     }
     pub fn get_ui_data(&self) -> UiState<'_> {
         UiState {
