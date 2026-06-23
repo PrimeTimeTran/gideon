@@ -19,7 +19,12 @@ tokio = "1.52.3"
 async-trait = "0.1.89"
 
 rmcp = { version = "1.7.0", features = ["client", "macros", "transport-child-process", "transport-io", "transport-streamable-http-client-unix-socket"] }
-serde = "1.0.228"
 anyhow = "1.0.102"
 jsonschema = "0.46.5"
 schemars = "1.2.1"
+
+reqwest = { version = "0.13.4", features = ["json", "blocking"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+colored = "3.1.1"
+ratatui = "0.30.2"
