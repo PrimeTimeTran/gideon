@@ -78,6 +78,7 @@ impl Runner {
 
     pub async fn run(&mut self, mut app: App) -> io::Result<()> {
         let _guard = &self._guard;
+        // app.scroll_to_bottom();
         loop {
             if self.should_exit.load(Ordering::SeqCst) || app.should_exit.load(Ordering::SeqCst) {
                 break;
@@ -270,6 +271,18 @@ impl App {
         }
     }
 
+    fn scroll_to_bottom(&mut self) {
+        if !self.ai_history.is_empty() {
+            let last_index = self.ai_history.len() - 1;
+            self.ai_list_state.select(Some(last_index));
+        }
+
+        if !self.user_history.is_empty() {
+            let last_index = self.user_history.len() - 1;
+            self.user_list_state.select(Some(last_index));
+        }
+    }
+
     fn apply_scroll(state: &mut ListState, delta: i32) {
         let offset = state.offset() as i32;
         let new_offset = (offset + delta).max(0) as usize;
@@ -360,65 +373,6 @@ impl App {
         }
         Ok(true)
     }
-    // fn handle_events(&mut self) -> anyhow::Result<bool> {
-    //     if let Event::Key(key) = event::read()? {
-    //         match self.mode {
-    //             AppMode::Normal => match key.code {
-    //                 KeyCode::Enter => self.handle_submit(),
-    //                 KeyCode::Char(':') if self.input_buffer.is_empty() => {
-    //                     self.input_buffer.push(':');
-    //                     self.mode = AppMode::Command;
-    //                 }
-    //                 KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-    //                     return Ok(false);
-    //                 }
-    //                 KeyCode::Backspace => {
-    //                     self.input_buffer.pop();
-    //                 }
-
-    //                 _ if key.code == self.key_config.next_tab.0
-    //                     && key.modifiers.contains(self.key_config.next_tab.1) =>
-    //                 {
-    //                     self.next_tab();
-    //                 }
-    //                 _ if key.code == self.key_config.prev_tab.0
-    //                     && key.modifiers.contains(self.key_config.prev_tab.1) =>
-    //                 {
-    //                     self.prev_tab();
-    //                 }
-
-    //                 KeyCode::Char(c) => {
-    //                     self.input_buffer.push(c);
-    //                 }
-
-    //                 _ => {}
-    //             },
-    //             AppMode::Command => match key.code {
-    //                 KeyCode::Enter => self.handle_submit(),
-    //                 KeyCode::Backspace => {
-    //                     self.input_buffer.pop();
-    //                     if self.input_buffer.is_empty() {
-    //                         self.mode = AppMode::Normal;
-    //                     }
-    //                 }
-    //                 KeyCode::Esc => {
-    //                     self.input_buffer.clear();
-    //                     self.mode = AppMode::Normal;
-    //                 }
-    //                 KeyCode::Char(c) => {
-    //                     self.input_buffer.push(c);
-    //                 }
-    //                 _ => {}
-    //             },
-    //             AppMode::LeaderPending => match key.code {
-    //                 KeyCode::Char('h') => self.history_mode(),
-    //                 _ => self.mode = AppMode::Normal,
-    //             },
-    //             _ => {}
-    //         }
-    //     }
-    //     Ok(true)
-    // }
     pub fn tick(&mut self) {
         self.update_cursor_blink();
 
@@ -436,8 +390,10 @@ impl App {
 
                         self.messages.push(Message {
                             role: Role::AI,
-                            content: answer,
+                            content: answer.clone(),
                         });
+                        self.ai_history.push(answer);
+                        // self.scroll_to_bottom();
                     }
                     Err(e) => {
                         self.agent_mode = AgentMode::Error(e.to_string());
@@ -506,11 +462,9 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
     app.user_area = content_chunks[1];
     let (ai_area, user_area) = (app.ai_area, app.user_area);
 
-    // 1. Render all widgets that require mutable app access FIRST
     render_conversation(f, app, ai_area);
     render_history(f, app, user_area);
 
-    // 2. Scope the snapshot so it is dropped after these widgets are drawn
     {
         let state = app.get_ui_data();
         render_tabs(f, &state, chunks[0]);
@@ -527,7 +481,7 @@ fn render_tabs(f: &mut Frame, state: &UiState, area: Rect) {
         area,
     );
 }
-// Note: Changed from UiState to &mut App to access the stateful list states
+
 fn render_conversation(f: &mut Frame, app: &mut App, area: Rect) {
     use textwrap::{Options, wrap};
     let width = area.width.saturating_sub(4) as usize;
@@ -544,19 +498,12 @@ fn render_conversation(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    // let list = List::new(msg_items).block(
-    //     Block::default()
-    //         .borders(Borders::ALL)
-    //         .title(" AI Responses "),
-    // );
-
     let list = List::new(msg_items).block(
         Block::default()
             .borders(Borders::ALL)
             .title(" AI Responses "),
     );
 
-    // CRITICAL: Use render_stateful_widget instead of render_widget
     f.render_stateful_widget(list, area, &mut app.ai_list_state);
 }
 
@@ -586,62 +533,7 @@ fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
 
     f.render_stateful_widget(list, area, &mut app.user_list_state);
 }
-// fn render_conversation(f: &mut Frame, state: &UiState, area: Rect) {
-//     use textwrap::{Options, wrap};
 
-//     let width = area.width.saturating_sub(4) as usize;
-
-//     // Now directly using state.ai_history
-//     let msg_items: Vec<ListItem> = state
-//         .ai_history
-//         .iter()
-//         .flat_map(|content| {
-//             let wrapped_lines = wrap(content, Options::new(width));
-//             wrapped_lines
-//                 .into_iter()
-//                 .map(|line| ListItem::new(line.into_owned()))
-//                 .chain(std::iter::once(ListItem::new("")))
-//         })
-//         .collect();
-
-//     f.render_widget(
-//         List::new(msg_items).block(
-//             Block::default()
-//                 .borders(Borders::ALL)
-//                 .title(" AI Responses "),
-//         ),
-//         area,
-//     );
-// }
-
-// fn render_history(f: &mut Frame, state: &UiState, area: Rect) {
-//     use textwrap::{Options, wrap};
-//     let width = area.width.saturating_sub(4) as usize;
-
-//     // Now directly using state.user_history
-//     let hist_items: Vec<ListItem> = state
-//         .user_history
-//         .iter()
-//         .flat_map(|content| {
-//             let wrapped_lines = wrap(content, Options::new(width));
-//             wrapped_lines
-//                 .into_iter()
-//                 .map(|line| ListItem::new(line.into_owned()))
-//                 .chain(std::iter::once(ListItem::new("")))
-//         })
-//         .collect();
-
-//     f.render_widget(
-//         List::new(hist_items)
-//             .block(
-//                 Block::default()
-//                     .borders(Borders::ALL)
-//                     .title(" Your Prompts "),
-//             )
-//             .highlight_symbol(">> "),
-//         area,
-//     );
-// }
 fn create_hint_widget(state: UiState<'_>) -> Paragraph<'_> {
     let hint_text = match state.mode {
         AppMode::Normal => "Esc to Quit | I to Edit | Enter to Send",
