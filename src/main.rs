@@ -86,11 +86,11 @@ impl Runner {
             if event::poll(std::time::Duration::from_millis(150))? {
                 match app.handle_events() {
                     Ok(false) => {
-                        app.exit();
+                        app.handle_exit();
                         break;
                     }
                     Err(_) => {
-                        app.exit();
+                        app.handle_exit();
                         break;
                     }
                     Ok(true) => {}
@@ -227,7 +227,7 @@ impl App {
         self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
     }
 
-    fn exit(&self) {
+    fn handle_exit(&self) {
         println!("Exiting");
         ratatui::restore();
         print!("\x1b[?25h\x1b[0m");
@@ -276,7 +276,6 @@ impl App {
         *state.offset_mut() = new_offset;
     }
 
-    // 2. Now call it without &mut self
     fn scroll_list(&mut self, mouse_pos: (u16, u16), delta: i32) {
         if self.ai_area.contains(mouse_pos.into()) {
             Self::apply_scroll(&mut self.ai_list_state, delta);
@@ -287,17 +286,22 @@ impl App {
     fn handle_events(&mut self) -> anyhow::Result<bool> {
         let event = event::read()?;
         if let Event::Mouse(mouse) = event {
-            dbg!("scrolling");
             let pos = (mouse.column, mouse.row);
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
-                    self.scroll_list(pos, -1);
+                    if self.ai_area.contains(pos.into()) || self.user_area.contains(pos.into()) {
+                        self.scroll_list(pos, -1);
+                    }
                 }
-                MouseEventKind::ScrollDown => {
+                MouseEventKind::ScrollDown
+                    if (self.ai_area.contains(pos.into())
+                        || self.user_area.contains(pos.into())) =>
+                {
                     self.scroll_list(pos, 1);
                 }
                 _ => {}
             }
+            return Ok(true);
         } else if let Event::Key(key) = event {
             match self.mode {
                 AppMode::Normal => match key.code {
