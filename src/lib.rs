@@ -9,6 +9,7 @@
 
 pub mod backend;
 pub mod cli_process;
+pub mod context;
 pub mod reg_command;
 pub mod router;
 pub mod runtime;
@@ -16,4 +17,4 @@ pub mod service;
 
 pub use backend::*;
 pub use cli_process::*;
-pub use service::*;
+pub use context::*;

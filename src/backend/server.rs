@@ -1,12 +1,6 @@
-use rmcp::handler::server::router::Router;
 use rmcp::{
-    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
-    handler::server::{router::prompt::PromptRouter, tool::ToolRouter, wrapper::Parameters},
-    model::*,
-    prompt, prompt_handler, prompt_router,
-    schemars::JsonSchema,
-    service::RequestContext,
-    tool, tool_handler, tool_router,
+    ErrorData as McpError, handler::server::wrapper::Parameters, model::*, prompt, prompt_router,
+    schemars::JsonSchema, tool, tool_router,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,12 +31,15 @@ impl MyServer {
             .build();
         handler
     }
+    pub fn add(&self, Parameters(args): Parameters<AddVars>) -> String {
+        (args.a + args.b).to_string()
+    }
 }
 
 #[prompt_router]
 impl MyServer {
     #[prompt(name = "greeting", description = "A simple greeting")]
-    async fn greeting(&self) -> Vec<PromptMessage> {
+    pub async fn greeting(&self) -> Vec<PromptMessage> {
         vec![PromptMessage::new_text(
             PromptMessageRole::User,
             "Hello! How can you help me today?",
