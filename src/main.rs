@@ -1,99 +1,474 @@
-use std::collections::HashMap;
-
-use anyhow::{Error, Ok};
-use cli::Context;
+use anyhow::Error;
 use colored::*;
-use reqwest::Client;
-use rmcp::ServiceExt;
-
-use tokio::{
-    io::{self, AsyncBufReadExt, stdin, stdout},
-    sync::mpsc,
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use ratatui::{
+    DefaultTerminal, Frame, Terminal,
+    backend::CrosstermBackend,
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::{
+    io::{self, BufRead, BufReader, Stdout, Write},
+    path::Path,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, Sender},
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-mod backend;
-mod cli_process;
-mod context;
-mod reg_command;
-mod router;
-mod runtime;
-mod service;
-
-use crate::{
-    backend::{server, server::MyServer, tool},
-    reg_command::{Cli, Command, parse},
-    router::execute,
-};
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = parse();
-    let ctx = Context {
-        verbose: cli.verbose,
-    };
-    run_mcp_logic().await?;
-    anyhow::Ok(())
+enum AppMode {
+    Normal,
+    Command,
+    Editing,
+    LeaderPending,
+}
+#[derive(PartialEq)]
+enum AgentMode {
+    Waiting,
+    Thinking,
+    Error(String),
 }
 
-async fn run_mcp_logic() -> anyhow::Result<()> {
-    let (tx, mut rx) = mpsc::channel::<String>(32);
-    tokio::spawn(async move {
-        let server = MyServer;
-        while let Some(command) = rx.recv().await {
-            match command.as_str() {
-                "hello" => {
-                    let msg = server.hello().await;
-                    dbg!("Server says: {:?}", msg);
-                }
-                "question" => {
-                    let msg = server.hello().await;
-                    dbg!("Server says: {:?}", msg);
-                }
-                "review" => {
-                    let result = server
-                        .code_review(rmcp::handler::server::wrapper::Parameters(
-                            server::CodeReviewArgs {
-                                language: "Rust".into(),
-                                focus_areas: Some(vec!["performance".into()]),
-                            },
-                        ))
-                        .await;
-                    dbg!("Review result: {:?}", result);
-                }
-                _ => {
-                    let result: Result<String, Error> = prompt_ollama(command).await;
+struct KeyConfig {
+    next_tab: (KeyCode, KeyModifiers),
+    prev_tab: (KeyCode, KeyModifiers),
+}
 
-                    if let std::result::Result::Ok(answer) = result {
-                        print_ai(&answer);
-                    } else {
-                        eprintln!("Error occurred!");
+impl Default for KeyConfig {
+    fn default() -> Self {
+        Self {
+            next_tab: (KeyCode::Char('l'), KeyModifiers::CONTROL),
+            prev_tab: (KeyCode::Char('h'), KeyModifiers::CONTROL),
+        }
+    }
+}
+
+#[derive(PartialEq)]
+struct Message {
+    role: Role,
+    content: String,
+}
+#[derive(PartialEq)]
+enum Role {
+    User,
+    AI,
+}
+struct App {
+    should_quit: Arc<AtomicBool>,
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+    cursor_visible: bool,
+    last_cursor_toggle: std::time::Instant,
+    logger: Logger,
+    tabs: Vec<String>,
+    active_tab: usize,
+    key_config: KeyConfig,
+    input_buffer: String,
+    history: Vec<String>,
+    messages: Vec<Message>,
+    logs: Vec<String>,
+    mode: AppMode,
+    agent_mode: AgentMode,
+    tx: Sender<anyhow::Result<String>>,
+    rx: Receiver<anyhow::Result<String>>,
+    spinner_index: usize,
+}
+
+impl App {
+    pub fn should_quit(&self) -> bool {
+        self.should_quit.load(Ordering::SeqCst)
+    }
+    fn new() -> Self {
+        let should_quit: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let q = should_quit.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            q.store(true, Ordering::SeqCst);
+        });
+
+        std::panic::set_hook(Box::new(|info| {
+            ratatui::restore();
+            eprintln!("Panic occurred: {:?}", info);
+        }));
+        let terminal = ratatui::init();
+        let (tx, rx) = mpsc::channel();
+        let session_id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self {
+            tx,
+            rx,
+            terminal,
+            logger: Logger::new(session_id),
+            spinner_index: 0,
+            tabs: vec!["Chat".into(), "Config".into(), "Logs".into()],
+            active_tab: 0,
+            should_quit,
+            key_config: KeyConfig::default(),
+            input_buffer: String::new(),
+            history: load_history(),
+            messages: Vec::new(),
+            logs: Vec::new(),
+            mode: AppMode::Normal,
+            agent_mode: AgentMode::Waiting,
+            cursor_visible: true,
+            last_cursor_toggle: std::time::Instant::now(),
+        }
+    }
+
+    fn next_tab(&mut self) {
+        self.active_tab = (self.active_tab + 1) % self.tabs.len();
+    }
+    fn prev_tab(&mut self) {
+        self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+    }
+    fn perform_special_quit(&mut self) {
+        self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+    }
+    fn history_mode(&mut self) {
+        self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+    }
+    fn exit(&self) {
+        println!("Exiting");
+        ratatui::restore();
+        print!("\x1b[?25h\x1b[0m");
+        let _ = std::io::stdout().flush();
+    }
+    fn handle_command(&mut self, input: &str) {
+        match input {
+            ":q" => self.should_quit = Arc::new(AtomicBool::new(true)),
+            ":history" => self.history_mode(),
+            _ => self.logs.push("Unknown command".to_string()),
+        }
+    }
+
+    fn handle_submit(&mut self) {
+        if self.input_buffer.is_empty() {
+            return;
+        }
+
+        let input = self.input_buffer.clone();
+        self.history.push(input.clone());
+        self.input_buffer.clear();
+        let _ = self.logger.log_to_file("user", &input);
+
+        if input.starts_with(':') {
+            self.handle_command(&input);
+        } else {
+            self.agent_mode = AgentMode::Thinking;
+
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                let result = prompt_ollama(input).await;
+                let _ = tx.send(result);
+            });
+        }
+
+        self.mode = AppMode::Normal;
+    }
+    fn update_cursor_blink(&mut self) {
+        if self.last_cursor_toggle.elapsed().as_millis() > 500 {
+            self.cursor_visible = !self.cursor_visible;
+            self.last_cursor_toggle = std::time::Instant::now();
+        }
+    }
+    fn handle_events(&mut self) -> anyhow::Result<bool> {
+        if let Event::Key(key) = event::read()? {
+            match self.mode {
+                AppMode::Normal => match key.code {
+                    KeyCode::Enter => self.handle_submit(),
+                    KeyCode::Char(':') if self.input_buffer.is_empty() => {
+                        self.input_buffer.push(':');
+                        self.mode = AppMode::Command;
                     }
+                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(false);
+                    }
+                    KeyCode::Backspace => {
+                        self.input_buffer.pop();
+                    }
+
+                    _ if key.code == self.key_config.next_tab.0
+                        && key.modifiers.contains(self.key_config.next_tab.1) =>
+                    {
+                        self.next_tab();
+                    }
+                    _ if key.code == self.key_config.prev_tab.0
+                        && key.modifiers.contains(self.key_config.prev_tab.1) =>
+                    {
+                        self.prev_tab();
+                    }
+
+                    KeyCode::Char(c) => {
+                        self.input_buffer.push(c);
+                    }
+
+                    _ => {}
+                },
+                AppMode::Command => match key.code {
+                    KeyCode::Enter => self.handle_submit(),
+                    KeyCode::Backspace => {
+                        self.input_buffer.pop();
+                        if self.input_buffer.is_empty() {
+                            self.mode = AppMode::Normal;
+                        }
+                    }
+                    KeyCode::Esc => {
+                        self.input_buffer.clear();
+                        self.mode = AppMode::Normal;
+                    }
+                    KeyCode::Char(c) => {
+                        self.input_buffer.push(c);
+                    }
+                    _ => {}
+                },
+                AppMode::LeaderPending => match key.code {
+                    KeyCode::Char('h') => self.history_mode(),
+                    _ => self.mode = AppMode::Normal,
+                },
+                _ => {}
+            }
+        }
+        Ok(true)
+    }
+}
+
+#[tokio::main]
+async fn main() -> io::Result<()> {
+    let should_quit = Arc::new(AtomicBool::new(false));
+    let q = should_quit.clone();
+
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.unwrap();
+        q.store(true, Ordering::SeqCst);
+    });
+    std::panic::set_hook(Box::new(|info| {
+        ratatui::restore();
+        eprintln!("Panic occurred: {:?}", info);
+    }));
+    #[allow(clippy::let_unit_value)]
+    let _guard = TerminalGuard;
+    let mut terminal = ratatui::init();
+    let mut app = App::new();
+
+    loop {
+        app.update_cursor_blink();
+        if app.agent_mode == AgentMode::Thinking {
+            app.spinner_index += 1;
+        }
+
+        if event::poll(std::time::Duration::from_millis(150))? {
+            match app.handle_events() {
+                Ok(false) => {
+                    app.exit();
+                    break;
+                }
+                Err(_) => {
+                    app.exit();
+                    break;
+                }
+                Ok(true) => {}
+            }
+        }
+        if let Ok(result) = app.rx.try_recv() {
+            app.agent_mode = AgentMode::Waiting;
+
+            match result {
+                Ok(answer) => {
+                    let _ = app.logger.log_to_file("ai", &answer);
+
+                    app.messages.push(Message {
+                        role: Role::AI,
+                        content: answer,
+                    });
+                }
+                Err(e) => {
+                    app.agent_mode = AgentMode::Error(e.to_string());
+                    app.logs.push(format!("AI Error: {}", e));
                 }
             }
         }
-    });
-
-    println!("MCP Shell Started. Type 'hello', 'review', or 'exit'.");
-
-    let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        reader.read_line(&mut line).await?;
-        let input = line.trim().to_string();
-
-        if input == "exit" {
-            break;
+        while !app.should_quit() {
+            app.handle_events()?;
+            // terminal.draw()?;
         }
-
-        let _ = tx.send(input).await;
+        terminal.draw(|f| draw_ui(f, &app))?;
     }
 
     Ok(())
 }
 
+fn draw_ui(f: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Top: Tabs
+            Constraint::Min(1),    // Middle: Content (Conversation + History)
+            Constraint::Length(3), // Hints
+            Constraint::Length(3), // Input
+        ])
+        .split(f.area());
+
+    f.render_widget(
+        Tabs::new(app.tabs.clone())
+            .select(app.active_tab)
+            .block(Block::default().borders(Borders::ALL).title(" Gideon ")),
+        chunks[0],
+    );
+
+    let content_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[1]);
+
+    let msg_items: Vec<ListItem> = app
+        .messages
+        .iter()
+        .map(|m| {
+            ListItem::new(format!(
+                "{}: {}",
+                if m.role == Role::User { "You" } else { "AI" },
+                m.content
+            ))
+        })
+        .collect();
+
+    f.render_widget(
+        List::new(msg_items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Conversation "),
+        ),
+        content_chunks[0],
+    );
+    render_history(f, app, content_chunks[1]);
+    f.render_widget(create_hint_widget(app), chunks[2]);
+    f.render_widget(create_input_widget(app), chunks[3]);
+}
+
+fn render_history(f: &mut Frame<'_>, app: &App, chunks: Rect) {
+    let hist_items: Vec<ListItem> = app
+        .history
+        .iter()
+        .map(|s| ListItem::new(s.as_str()))
+        .collect();
+
+    f.render_widget(
+        List::new(hist_items).block(Block::default().borders(Borders::ALL).title(" History ")),
+        chunks,
+    );
+}
+
+fn create_input_widget(app: &App) -> Paragraph<'_> {
+    let buffer = &app.input_buffer;
+    let spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let prefix = if app.agent_mode == AgentMode::Thinking {
+        spinner_chars[app.spinner_index % spinner_chars.len()].to_string()
+    } else if !buffer.is_empty()
+        && matches!(
+            buffer.chars().next().unwrap(),
+            ':' | '!' | '/' | '.' | '#' | '@'
+        )
+    {
+        buffer.chars().next().unwrap().to_string()
+    } else {
+        ">".to_string()
+    };
+    let mut spans = vec![Span::styled(
+        format!("{} ", prefix),
+        Style::default().fg(Color::Yellow).bold(),
+    )];
+
+    let content = if app.agent_mode == AgentMode::Thinking {
+        "Thinking...".to_string()
+    } else {
+        app.input_buffer.clone()
+    };
+
+    spans.push(Span::styled(content, Style::default().fg(Color::White)));
+    if app.agent_mode != AgentMode::Thinking && app.cursor_visible {
+        spans.push(Span::styled("_", Style::default().fg(Color::Yellow).bold()));
+    }
+    let line = Line::from(spans);
+    Paragraph::new(line).block(Block::default().borders(Borders::ALL).title(" Input "))
+}
+
+// fn handle_command(app: &mut App, input: &str) {
+//     match input {
+//         ":q" => app.should_quit = true,
+//         ":history" => app.history_mode(),
+//         _ => app.logs.push("Unknown command".to_string()),
+//     }
+// }
+
+#[derive(Deserialize, Debug)]
+struct OllamaResponse {
+    model: String,
+    created_at: String,
+    response: String,
+    done: bool,
+}
+
+async fn run_agent_loop(user_input: String) -> anyhow::Result<()> {
+    let ollama_res = prompt_ollama_for_json(user_input).await?;
+    let json_content = ollama_res.response.trim();
+    match serde_json::from_str::<AgentCommand>(json_content) {
+        Ok(cmd) => match cmd {
+            AgentCommand::WriteFile { path, content } => {
+                if path.starts_with("./allowed_dir/") {
+                    std::fs::write(path, content)?;
+                    println!("Action executed successfully.");
+                } else {
+                    println!("Security error: Access denied to path.");
+                }
+            }
+            AgentCommand::ReadFile { path } => {
+                println!("AI: {}", path)
+            }
+            AgentCommand::Chat { message } => println!("AI: {}", message),
+            // _ => {
+            //     todo!("unhandled")
+            // }
+        },
+        Err(e) => {
+            // CRITICAL: Handle cases where the LLM talks instead of returning JSON
+            eprintln!(
+                "Failed to parse command from AI: {}. Raw text: {}",
+                e, json_content
+            );
+        }
+    }
+    Ok(())
+}
+async fn prompt_ollama_for_json(user_input: String) -> anyhow::Result<OllamaResponse> {
+    use reqwest::Client;
+    let client = Client::new();
+    let url = "http://localhost:11434/api/generate";
+
+    let payload = json!({
+        "model": "qwen3:8b",
+        "prompt": format!("{} Respond with only a valid JSON object.", user_input),
+        "stream": false,
+        "format": "json"
+    });
+    let value = client
+        .post(url)
+        .json(&payload)
+        .send()
+        .await?
+        .json::<OllamaResponse>()
+        .await?;
+    anyhow::Ok(value)
+}
 async fn prompt_ollama(user_input: String) -> anyhow::Result<String> {
+    use reqwest::Client;
     let client = Client::new();
     let url = "http://localhost:11434/api/generate";
 
@@ -114,14 +489,6 @@ async fn prompt_ollama(user_input: String) -> anyhow::Result<String> {
     anyhow::Ok(res.response.trim().to_string())
 }
 
-use serde::Deserialize;
-use serde_json::json;
-
-#[derive(Deserialize, Debug)]
-struct OllamaResponse {
-    response: String,
-}
-
 pub fn print_user(input: &str) {
     println!("{}: {}", "You".blue().bold(), input);
 }
@@ -134,33 +501,105 @@ pub fn print_system(msg: &str) {
     println!("{} {}", "::".yellow(), msg.italic());
 }
 
-enum GideonOutput {
-    User(String),
-    AI(String),
-    System(String),
-    Error(String),
-}
+struct TerminalGuard;
 
-impl GideonOutput {
-    fn display(&self) {
-        match self {
-            Self::User(s) => println!("{}: {}", "You".blue(), s),
-            Self::AI(s) => println!("{}: {}", "AI".green(), s),
-            Self::System(s) => println!("{} {}", "->".yellow(), s),
-            Self::Error(s) => eprintln!("{}: {}", "Error".red(), s),
-        }
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        dbg!("Quitting");
+        ratatui::restore();
+        let _ = io::stdout().flush();
     }
 }
 
-// struct Dispatcher {
-//     handlers: HashMap<char, Box<dyn CommandHandler>>,
-// }
+use std::fs::{File, OpenOptions};
 
-// impl Dispatcher {
-//     fn handle(&self, input: &str) {
-//         let prefix = input.chars().next();
-//         if let Some(h) = self.handlers.get(&prefix) {
-//             h.execute(&input[1..]);
-//         }
-//     }
-// }
+fn load_history() -> Vec<String> {
+    let path = "history.txt";
+    if !Path::new(path).exists() {
+        return Vec::new();
+    }
+
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to open history file: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let reader = BufReader::new(file);
+    reader.lines().map_while(Result::ok).collect()
+}
+#[derive(Serialize, Deserialize, Clone)]
+struct LogEntry {
+    session: u64,
+    role: String,
+    content: String,
+    timestamp: u64,
+}
+
+struct Logger {
+    session_id: u64,
+}
+impl Logger {
+    fn new(session_id: u64) -> Self {
+        Self { session_id }
+    }
+    fn log_to_file(&self, role: &str, content: &str) -> io::Result<()> {
+        let entry = LogEntry {
+            session: self.session_id,
+            role: role.to_string(),
+            content: content.to_string(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("chat_log.jsonl")?;
+
+        let json = serde_json::to_string(&entry).map_err(io::Error::other)?;
+        writeln!(file, "{}", json)?;
+        Ok(())
+    }
+}
+
+fn create_hint_widget(app: &App) -> Paragraph<'_> {
+    // Define hints based on state
+    let hint_text = match app.mode {
+        AppMode::Normal => "Esc to Quit | I to Edit | Enter to Send",
+        AppMode::Editing => "Esc to Normal | Ctrl+S to Save",
+        _ => "hi",
+    };
+
+    Paragraph::new(hint_text)
+        .block(Block::default().borders(Borders::ALL).title(" Hints "))
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::DIM),
+        )
+        .alignment(Alignment::Center)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "action", content = "params")]
+enum AgentCommand {
+    WriteFile { path: String, content: String },
+    ReadFile { path: String },
+    Chat { message: String },
+}
+
+async fn get_command_with_retry(user_input: String) -> anyhow::Result<AgentCommand> {
+    for _ in 0..3 {
+        let res = prompt_ollama_for_json(user_input.clone()).await?;
+        if let Ok(cmd) = serde_json::from_str::<AgentCommand>(&res.response) {
+            return Ok(cmd);
+        }
+        // Optionally: append "Previous response was not valid JSON. Please try again."
+    }
+    anyhow::bail!("AI failed to provide valid JSON after 3 attempts.")
+}
