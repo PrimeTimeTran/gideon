@@ -1,36 +1,10 @@
-use anyhow::Error;
-use colored::*;
-use crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
-    },
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ratatui::{
-    DefaultTerminal, Frame, Terminal,
-    backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs},
-};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use std::io::Write;
 use std::{
     fs::{File, OpenOptions},
-    io::{self, BufRead, BufReader, Stdout, Write},
+    io::{self, BufRead, BufReader},
     path::Path,
-    rc::Rc,
-    sync::Mutex,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, Sender},
-    },
-    time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::broadcast;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct HistoryEntry {

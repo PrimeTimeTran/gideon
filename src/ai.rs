@@ -124,7 +124,6 @@ pub async fn prompt_ollama(user_input: &str) -> anyhow::Result<AgentCommand> {
     let client = Client::new();
     let url = "http://localhost:11434/api/generate";
 
-    // 1. Define the system/format instructions
     let system_instructions = r#"
         You are a JSON-only API. Respond ONLY with a valid JSON object matching one of these:
         {"type": "WriteFile", "data": {"path": "...", "content": "..."}}

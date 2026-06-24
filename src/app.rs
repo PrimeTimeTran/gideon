@@ -1,4 +1,3 @@
-// src/app.rs
 use crate::{
     ai::{AgentStatus, prompt_ollama, run_agent_loop},
     logger::Logger,
@@ -393,38 +392,6 @@ impl App {
                 }
             }
         }
-
-        // match self.rx.try_recv() {
-        //     Ok(result) => {
-        //         self.agent_mode = AgentMode::Waiting;
-
-        //         match result {
-        //             Ok(answer) => {
-        //                 let _ = self.logger.log_to_file("ai", &answer);
-
-        //                 self.messages.push(Message {
-        //                     role: Role::AI,
-        //                     content: answer.clone(),
-        //                 });
-        //                 self.ai_history.push(answer);
-        //             }
-        //             Err(e) => {
-        //                 self.agent_mode = AgentMode::Error(e.to_string());
-        //                 self.logs.push(format!("AI Error: {}", e));
-        //             }
-        //         }
-        //     }
-        //     Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
-        //         // No message, nothing to do
-        //     }
-        //     Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
-        //         // Optional: Handle if we missed messages
-        //         self.logs.push(format!("Warning: Missed {} messages", n));
-        //     }
-        //     Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
-        //         // Channel closed, might want to handle this
-        //     }
-        // }
     }
     pub fn get_ui_data(&self) -> UiState<'_> {
         UiState {

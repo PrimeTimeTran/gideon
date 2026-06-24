@@ -1,6 +1,5 @@
 use rmcp::{
-    ServerHandler, ServiceExt, handler::server::wrapper::Parameters, schemars, tool, tool_handler,
-    tool_router, transport::stdio,
+    ServerHandler, handler::server::wrapper::Parameters, schemars, tool, tool_handler, tool_router,
 };
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
