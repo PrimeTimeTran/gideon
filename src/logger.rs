@@ -6,14 +6,6 @@ use std::{
     path::Path,
 };
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct HistoryEntry {
-    session: u64,
-    role: String,
-    content: String,
-    timestamp: u64,
-}
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct LogEntry {
     session: u64,

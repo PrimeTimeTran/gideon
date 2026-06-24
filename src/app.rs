@@ -1,8 +1,9 @@
 use crate::{
-    ai::{AgentStatus, prompt_ollama, run_agent_loop},
+    agent::{AgentBus, AgentEvent, RuntimeEvent, SystemEvent, Task, TaskEvent, TaskResult},
     logger::Logger,
     ui::{UiState, render_ui},
 };
+
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, widgets::ListState};
@@ -14,11 +15,12 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::mpsc::UnboundedReceiver;
 
 pub struct Runner {
     pub terminal: Terminal<CrosstermBackend<Stdout>>,
     _guard: TerminalGuard,
-    pub(crate) should_exit: Arc<AtomicBool>,
+    pub should_exit: Arc<AtomicBool>,
 }
 
 impl Runner {
@@ -45,7 +47,6 @@ impl Runner {
 
     pub async fn run(&mut self, mut app: App) -> io::Result<()> {
         let _guard = &self._guard;
-        // app.scroll_to_bottom();
         loop {
             if self.should_exit.load(Ordering::SeqCst) || app.should_exit.load(Ordering::SeqCst) {
                 break;
@@ -81,6 +82,7 @@ pub enum AppMode {
 }
 #[derive(PartialEq, Clone)]
 pub enum AgentMode {
+    Done,
     Waiting,
     Thinking,
     Error(String),
@@ -138,25 +140,31 @@ pub struct App {
 
     pub mode: AppMode,
     pub agent_mode: AgentMode,
-    pub tx: tokio::sync::mpsc::UnboundedSender<AgentStatus>,
-    pub rx: tokio::sync::mpsc::UnboundedReceiver<AgentStatus>,
     pub spinner_index: usize,
+    pub agent_bus: AgentBus,
+    pub rx: UnboundedReceiver<RuntimeEvent>,
 }
 
 impl App {
-    pub fn new(should_exit: Arc<AtomicBool>) -> Self {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentStatus>();
+    pub fn new(
+        should_exit: Arc<AtomicBool>,
+        agent_bus: AgentBus,
+        rx: UnboundedReceiver<RuntimeEvent>,
+    ) -> Self {
         let session_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+
         let logger = Logger::new(session_id);
+
         let (history_u, history_a) = logger.load_history();
         let mut combined_history = history_u.clone();
         combined_history.extend(history_a.clone());
+
         Self {
-            tx,
             rx,
+            agent_bus,
             is_initialized: false,
             user_list_state: ListState::default(),
             ai_list_state: ListState::default(),
@@ -188,9 +196,9 @@ impl App {
     fn prev_tab(&mut self) {
         self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
     }
-    fn perform_special_quit(&mut self) {
-        self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
-    }
+    // fn perform_special_quit(&mut self) {
+    //     self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+    // }
 
     fn history_mode(&mut self) {
         self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
@@ -215,34 +223,32 @@ impl App {
         }
 
         let input = self.input_buffer.clone();
+
         self.history.push(input.clone());
         self.user_history.push(input.clone());
         self.input_buffer.clear();
+
         let _ = self.logger.log_to_file("user", &input);
 
         if input.starts_with(':') {
             self.handle_command(&input);
-        } else {
-            self.agent_mode = AgentMode::Thinking;
-            let tx = self.tx.clone();
-
-            let input_text = input.clone();
-
-            tokio::spawn(async move {
-                match run_agent_loop(input_text, tx.clone()).await {
-                    Ok(_) => {
-                        // Signal completion to the UI
-                        // let _ = tx.send(AgentStatus::Finished(
-                        //     "Action executed successfully.".to_string(),
-                        // ));
-                    }
-                    Err(e) => {
-                        // Signal error to the UI
-                        let _ = tx.send(AgentStatus::Error(e.to_string()));
-                    }
-                }
-            });
+            self.mode = AppMode::Normal;
+            return;
         }
+
+        self.agent_mode = AgentMode::Thinking;
+
+        let task = Task {
+            id: uuid::Uuid::new_v4().to_string(),
+            prompt: input,
+        };
+
+        let bus = self.agent_bus.clone();
+
+        tokio::spawn(async move {
+            let _ = bus.tx.send(AgentEvent::NewTask { task });
+        });
+
         self.mode = AppMode::Normal;
     }
     fn update_cursor_blink(&mut self) {
@@ -373,26 +379,45 @@ impl App {
         if self.agent_mode == AgentMode::Thinking {
             self.spinner_index += 1;
         }
+        while let Ok(event) = self.rx.try_recv() {
+            self.reduce(event);
+        }
+    }
+    fn reduce(&mut self, event: RuntimeEvent) {
+        match event {
+            RuntimeEvent::Agent(agent_event) => {
+                self.reduce_agent_event(agent_event);
+            }
 
-        while let Ok(status) = self.rx.try_recv() {
-            match status {
-                AgentStatus::Thinking => {
-                    self.agent_mode = AgentMode::Thinking;
-                }
-                AgentStatus::Working(msg) => {
-                    self.logs.push(msg);
-                }
-                AgentStatus::Finished(answer) => {
-                    let _ = self.logger.log_to_file("ai", &answer);
-                    self.agent_mode = AgentMode::Waiting;
-                    self.ai_history.push(answer);
-                }
-                AgentStatus::Error(e) => {
-                    self.agent_mode = AgentMode::Error(e);
-                }
+            RuntimeEvent::System(system_event) => {
+                self.reduce_system_event(system_event);
             }
         }
     }
+    fn reduce_agent_event(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::Finished { result } => self.task_finished(result),
+
+            AgentEvent::TaskEvent { task, event } => {
+                self.apply_task_event(task, event);
+            }
+
+            _ => {}
+        }
+    }
+    fn reduce_system_event(&mut self, event: SystemEvent) {
+        match event {
+            SystemEvent::TaskAdd { task_id } => {
+                self.logs.push(format!("Task queued: {task_id}"));
+            }
+            SystemEvent::TaskCompleted { result } => {
+                // print!("Task queued: {:?}", result);
+                self.logs.push(format!("Task queued: {:?}", result));
+            }
+            _ => {}
+        }
+    }
+
     pub fn get_ui_data(&self) -> UiState<'_> {
         UiState {
             user_history: &self.user_history,
@@ -408,6 +433,16 @@ impl App {
             spinner_index: self.spinner_index,
             cursor_visible: self.cursor_visible,
         }
+    }
+    fn apply_task_event(&mut self, task: Task, event: TaskEvent) {
+        todo!("Hi")
+    }
+    fn task_finished(&mut self, result: TaskResult) {
+        let summary = result.chat.unwrap_or_else(|| "done".to_string());
+        let _ = self.logger.log_to_file("ai", &summary);
+        self.ai_history.push(summary);
+        self.mode = AppMode::Normal;
+        self.agent_mode = AgentMode::Done;
     }
 }
 

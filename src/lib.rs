@@ -7,7 +7,7 @@
 #![warn(unused_assignments)]
 #![warn(unused_must_use)]
 
-pub mod ai;
+pub mod agent;
 pub mod app;
 pub mod backend;
 pub mod cli_process;
