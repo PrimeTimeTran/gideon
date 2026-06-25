@@ -22,14 +22,8 @@ pub struct AgentTools {
     pub mcp: McpClient,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct Vfs;
-
-impl Default for Vfs {
-    fn default() -> Self {
-        Self
-    }
-}
 
 impl Vfs {
     pub fn new() -> Self {

@@ -4,124 +4,9 @@ use tokio::sync::mpsc::UnboundedSender;
 // use vfs::fs;
 
 use crate::agent::{
-    AgentEvent, AgentTools, Artifact, RuntimeEvent, Task, TaskResult, TaskStatus, WorkspaceContext,
+    ACTION_PROMPT, AgentEvent, AgentTools, Artifact, DECIDE_PROMPT, JSON_PROMPT, RuntimeEvent,
+    Task, TaskResult, TaskStatus, WorkspaceContext, build_sys_action, build_sys_prompt,
 };
-
-#[derive(Debug, serde::Deserialize)]
-pub struct LlmMode {
-    pub mode: String,
-}
-
-#[derive(Debug)]
-pub enum AgentMode {
-    Chat,
-    Tool,
-}
-
-#[derive(PartialEq, Clone)]
-pub enum AgentStatus {
-    Done,
-    Waiting,
-    Thinking,
-    Error(String),
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct LlmAction {
-    pub action: String,
-    pub path: Option<String>,
-    pub content: Option<String>,
-    pub message: Option<String>,
-}
-
-#[derive(Debug)]
-pub struct AgentContext {
-    pub prompt: String,
-    pub workspace: WorkspaceContext,
-    pub history: Vec<AgentObservation>,
-    pub artifacts: Vec<Artifact>,
-    pub logs: Vec<String>,
-    pub spawned_tasks: Vec<Task>,
-}
-
-impl AgentContext {
-    pub fn new(user_prompt: String) -> Self {
-        Self {
-            prompt: user_prompt,
-            logs: vec![],
-            artifacts: vec![],
-            spawned_tasks: vec![],
-            history: vec![],
-            workspace: WorkspaceContext::default(),
-        }
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-pub enum AgentObservation {
-    ReadFile { path: String, content: String },
-    WriteFile { path: String, success: bool },
-    Current { message: String },
-}
-
-#[derive(Clone, Debug)]
-pub struct AgentBus {
-    pub tx: UnboundedSender<AgentEvent>,
-    pub event_tx: UnboundedSender<RuntimeEvent>,
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-#[serde(tag = "type", content = "data")]
-pub enum AgentCommand {
-    WriteFile { path: String, content: String },
-    ReadFile { path: String },
-    Chat { message: String },
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "action")]
-pub enum AgentAction {
-    #[serde(rename = "read_file")]
-    ReadFile { path: String },
-
-    #[serde(rename = "write_file")]
-    WriteFile { path: String, content: String },
-
-    #[serde(rename = "finish")]
-    Finish { message: String },
-
-    #[serde(rename = "current")]
-    Current { message: String },
-}
-
-impl TryFrom<LlmAction> for AgentAction {
-    type Error = anyhow::Error;
-
-    fn try_from(v: LlmAction) -> Result<Self, Self::Error> {
-        match v.action.as_str() {
-            "read_file" => Ok(Self::ReadFile {
-                path: v.path.ok_or_else(|| anyhow::anyhow!("missing path"))?,
-            }),
-
-            "write_file" => Ok(Self::WriteFile {
-                path: v.path.ok_or_else(|| anyhow::anyhow!("missing path"))?,
-                content: v
-                    .content
-                    .ok_or_else(|| anyhow::anyhow!("missing content"))?,
-            }),
-
-            "current" => Ok(Self::Current {
-                message: v.message.unwrap_or_default(),
-            }),
-
-            "finish" => Ok(Self::Finish {
-                message: v.message.unwrap_or_default(),
-            }),
-
-            other => Err(anyhow::anyhow!("unknown action: {}", other)),
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct Agent {
@@ -254,22 +139,7 @@ impl Agent {
         }
     }
     async fn decide_mode(&self, ctx: &AgentContext) -> anyhow::Result<AgentMode> {
-        let prompt = format!(
-            r#"
-            You are a router.
-
-            Decide if this request needs tools or is chat only.
-
-            USER:
-            {}
-
-            Return JSON:
-            {{
-                "mode": "chat" | "tool"
-            }}
-            "#,
-            ctx.prompt
-        );
+        let prompt = build_sys_prompt(DECIDE_PROMPT, &ctx.prompt);
 
         let raw: LlmMode = prompt_ollama_json(&prompt).await?;
 
@@ -287,76 +157,129 @@ impl Agent {
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct LlmMode {
+    pub mode: String,
+}
+
+#[derive(Debug)]
+pub enum AgentMode {
+    Chat,
+    Tool,
+}
+
+#[derive(PartialEq, Clone)]
+pub enum AgentStatus {
+    Done,
+    Waiting,
+    Thinking,
+    Error(String),
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct LlmAction {
+    pub action: String,
+    pub path: Option<String>,
+    pub content: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct AgentContext {
+    pub prompt: String,
+    pub workspace: WorkspaceContext,
+    pub history: Vec<AgentObservation>,
+    pub artifacts: Vec<Artifact>,
+    pub logs: Vec<String>,
+    pub spawned_tasks: Vec<Task>,
+}
+
+impl AgentContext {
+    pub fn new(user_prompt: String) -> Self {
+        Self {
+            prompt: user_prompt,
+            logs: vec![],
+            artifacts: vec![],
+            spawned_tasks: vec![],
+            history: vec![],
+            workspace: WorkspaceContext::default(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub enum AgentObservation {
+    ReadFile { path: String, content: String },
+    WriteFile { path: String, success: bool },
+    Current { message: String },
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentBus {
+    pub tx: UnboundedSender<AgentEvent>,
+    pub event_tx: UnboundedSender<RuntimeEvent>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "action")]
+pub enum AgentAction {
+    #[serde(rename = "read_file")]
+    ReadFile { path: String },
+
+    #[serde(rename = "write_file")]
+    WriteFile { path: String, content: String },
+
+    #[serde(rename = "finish")]
+    Finish { message: String },
+
+    #[serde(rename = "current")]
+    Current { message: String },
+}
+
+impl TryFrom<LlmAction> for AgentAction {
+    type Error = anyhow::Error;
+
+    fn try_from(v: LlmAction) -> Result<Self, Self::Error> {
+        match v.action.as_str() {
+            "read_file" => Ok(Self::ReadFile {
+                path: v.path.ok_or_else(|| anyhow::anyhow!("missing path"))?,
+            }),
+
+            "write_file" => Ok(Self::WriteFile {
+                path: v.path.ok_or_else(|| anyhow::anyhow!("missing path"))?,
+                content: v
+                    .content
+                    .ok_or_else(|| anyhow::anyhow!("missing content"))?,
+            }),
+
+            "current" => Ok(Self::Current {
+                message: v.message.unwrap_or_default(),
+            }),
+
+            "finish" => Ok(Self::Finish {
+                message: v.message.unwrap_or_default(),
+            }),
+
+            other => Err(anyhow::anyhow!("unknown action: {}", other)),
+        }
+    }
+}
+
 fn build_prompt(ctx: &AgentContext) -> String {
-    format!(
-        r#"
-            You are an agent that MUST output a single JSON object.
-
-            Your job is to choose the next action based on the context.
-
-            ---
-
-            USER REQUEST:
-            {}
-
-            ---
-
-            WORKSPACE:
-            {}
-
-            ---
-
-            HISTORY:
-            {}
-
-            ---
-
-            RULES:
-            - Output ONLY valid JSON
-            - No markdown
-            - No explanation
-            - No extra keys
-
-            ---
-
-            YOU MUST OUTPUT ONE OF THESE FORMS:
-
-            1. Read file:
-            {{
-                "action": "read_file",
-                "path": "relative/file/path.rs"
-            }}
-
-            2. Write file:
-            {{
-                "action": "write_file",
-                "path": "relative/file/path.rs",
-                "content": "file content here"
-            }}
-
-            3. Finish:
-            {{
-                "action": "finish",
-                "message": "done"
-            }}
-        "#,
-        ctx.prompt,
-        format_workspace(&ctx.workspace),
-        format_history(&ctx.history)
-    )
+    return build_sys_action(
+        ACTION_PROMPT,
+        &[
+            &ctx.prompt,
+            &format_workspace(&ctx.workspace),
+            &format_history(&ctx.history),
+        ],
+    );
 }
 
 async fn build_action(prompt: &str) -> anyhow::Result<LlmAction> {
     let client = reqwest::Client::new();
 
-    let system_prompt = r#"
-        You are a strict JSON generator.
-
-        You must output ONLY valid JSON.
-        No markdown.
-        No explanation.
-        No extra text.
-        "#;
+    let system_prompt: &str = JSON_PROMPT;
 
     let payload = serde_json::json!({
         "model": "qwen3:8b",

@@ -16,33 +16,6 @@ use std::{
 use tokio::sync::mpsc::UnboundedReceiver;
 
 #[derive(Clone)]
-pub struct KeyConfig {
-    next_tab: (KeyCode, KeyModifiers),
-    prev_tab: (KeyCode, KeyModifiers),
-}
-
-impl Default for KeyConfig {
-    fn default() -> Self {
-        Self {
-            next_tab: (KeyCode::Char('l'), KeyModifiers::CONTROL),
-            prev_tab: (KeyCode::Char('h'), KeyModifiers::CONTROL),
-        }
-    }
-}
-
-#[derive(PartialEq, Clone)]
-pub struct Message {
-    role: Role,
-    content: String,
-}
-
-#[derive(PartialEq, Clone)]
-enum Role {
-    // User,
-    // AI,
-}
-
-#[derive(Clone)]
 pub enum AppMode {
     Normal,
     Command,
@@ -125,7 +98,9 @@ impl App {
             last_cursor_toggle: std::time::Instant::now(),
         }
     }
+}
 
+impl App {
     fn next_tab(&mut self) {
         self.active_tab = (self.active_tab + 1) % self.tabs.len();
     }
@@ -183,51 +158,6 @@ impl App {
         });
 
         self.mode = AppMode::Normal;
-    }
-    fn update_cursor_blink(&mut self) {
-        if self.last_cursor_toggle.elapsed().as_millis() > 500 {
-            self.cursor_visible = !self.cursor_visible;
-            self.last_cursor_toggle = std::time::Instant::now();
-        }
-    }
-
-    pub fn scroll_all_to_bottom(&mut self, width: u16) {
-        if self.is_initialized {
-            return;
-        }
-
-        use textwrap::{Options, wrap};
-        let wrap_opts = Options::new(width.saturating_sub(4) as usize);
-
-        let ai_lines: usize = self
-            .ai_history
-            .iter()
-            .map(|content| wrap(content, &wrap_opts).len() + 1)
-            .sum();
-
-        let user_lines: usize = self
-            .user_history
-            .iter()
-            .map(|content| wrap(content, &wrap_opts).len() + 1)
-            .sum();
-        *self.ai_list_state.offset_mut() = ai_lines.saturating_sub(20);
-        *self.user_list_state.offset_mut() = user_lines.saturating_sub(20);
-
-        self.is_initialized = true;
-    }
-
-    fn apply_scroll(state: &mut ListState, delta: i32) {
-        let offset = state.offset() as i32;
-        let new_offset = (offset + delta).max(0) as usize;
-        *state.offset_mut() = new_offset;
-    }
-
-    fn scroll_list(&mut self, mouse_pos: (u16, u16), delta: i32) {
-        if self.ai_area.contains(mouse_pos.into()) {
-            Self::apply_scroll(&mut self.ai_list_state, delta);
-        } else if self.user_area.contains(mouse_pos.into()) {
-            Self::apply_scroll(&mut self.user_list_state, delta);
-        }
     }
     pub fn handle_events(&mut self) -> anyhow::Result<bool> {
         let event = event::read()?;
@@ -306,8 +236,41 @@ impl App {
         }
         Ok(true)
     }
+
+    pub fn scroll_all_to_bottom(&mut self, width: u16) {
+        if self.is_initialized {
+            return;
+        }
+
+        use textwrap::{Options, wrap};
+        let wrap_opts = Options::new(width.saturating_sub(4) as usize);
+
+        let ai_lines: usize = self
+            .ai_history
+            .iter()
+            .map(|content| wrap(content, &wrap_opts).len() + 1)
+            .sum();
+
+        let user_lines: usize = self
+            .user_history
+            .iter()
+            .map(|content| wrap(content, &wrap_opts).len() + 1)
+            .sum();
+        *self.ai_list_state.offset_mut() = ai_lines.saturating_sub(20);
+        *self.user_list_state.offset_mut() = user_lines.saturating_sub(20);
+
+        self.is_initialized = true;
+    }
+    fn scroll_list(&mut self, mouse_pos: (u16, u16), delta: i32) {
+        if self.ai_area.contains(mouse_pos.into()) {
+            Self::apply_scroll(&mut self.ai_list_state, delta);
+        } else if self.user_area.contains(mouse_pos.into()) {
+            Self::apply_scroll(&mut self.user_list_state, delta);
+        }
+    }
+
     pub fn tick(&mut self) {
-        self.update_cursor_blink();
+        self.apply_cursor_blink();
 
         if self.agent_status == AgentStatus::Thinking {
             self.spinner_index += 1;
@@ -316,6 +279,7 @@ impl App {
             self.reduce(event);
         }
     }
+
     fn reduce(&mut self, event: RuntimeEvent) {
         match event {
             RuntimeEvent::Agent(agent_event) => {
@@ -329,7 +293,7 @@ impl App {
     }
     fn reduce_agent_event(&mut self, event: AgentEvent) {
         match event {
-            AgentEvent::Finished { result } => self.task_finished(result),
+            AgentEvent::Finished { result } => self.apply_task_finished(result),
 
             AgentEvent::TaskEvent { task, event } => {
                 self.apply_task_event(task, event);
@@ -350,6 +314,27 @@ impl App {
             _ => {}
         }
     }
+    fn apply_cursor_blink(&mut self) {
+        if self.last_cursor_toggle.elapsed().as_millis() > 500 {
+            self.cursor_visible = !self.cursor_visible;
+            self.last_cursor_toggle = std::time::Instant::now();
+        }
+    }
+    fn apply_scroll(state: &mut ListState, delta: i32) {
+        let offset = state.offset() as i32;
+        let new_offset = (offset + delta).max(0) as usize;
+        *state.offset_mut() = new_offset;
+    }
+    fn apply_task_event(&mut self, task: Task, event: TaskEvent) {
+        todo!("Hi")
+    }
+    fn apply_task_finished(&mut self, result: TaskResult) {
+        let summary = result.chat.unwrap_or_else(|| "done".to_string());
+        let _ = self.logger.log_to_file("ai", &summary);
+        self.ai_history.push(summary);
+        self.mode = AppMode::Normal;
+        self.agent_status = AgentStatus::Done;
+    }
 
     pub fn get_ui_data(&self) -> UiState<'_> {
         UiState {
@@ -367,14 +352,31 @@ impl App {
             cursor_visible: self.cursor_visible,
         }
     }
-    fn apply_task_event(&mut self, task: Task, event: TaskEvent) {
-        todo!("Hi")
+}
+
+#[derive(Clone)]
+pub struct KeyConfig {
+    next_tab: (KeyCode, KeyModifiers),
+    prev_tab: (KeyCode, KeyModifiers),
+}
+
+impl Default for KeyConfig {
+    fn default() -> Self {
+        Self {
+            next_tab: (KeyCode::Char('l'), KeyModifiers::CONTROL),
+            prev_tab: (KeyCode::Char('h'), KeyModifiers::CONTROL),
+        }
     }
-    fn task_finished(&mut self, result: TaskResult) {
-        let summary = result.chat.unwrap_or_else(|| "done".to_string());
-        let _ = self.logger.log_to_file("ai", &summary);
-        self.ai_history.push(summary);
-        self.mode = AppMode::Normal;
-        self.agent_status = AgentStatus::Done;
-    }
+}
+
+#[derive(PartialEq, Clone)]
+pub struct Message {
+    role: Role,
+    content: String,
+}
+
+#[derive(PartialEq, Clone)]
+enum Role {
+    // User,
+    // AI,
 }
