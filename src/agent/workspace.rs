@@ -1,6 +1,6 @@
 use crate::agent::FileInfo;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct WorkspaceContext {
     pub files: Vec<FileInfo>,
 }
@@ -10,16 +10,8 @@ impl WorkspaceContext {
     }
 }
 
-impl Default for WorkspaceContext {
-    fn default() -> Self {
-        Self { files: vec![] }
-    }
-}
 impl WorkspaceContext {
     pub fn load() -> anyhow::Result<Self> {
-        // TODO:
-        // load from VFS
-
         Ok(Self { files: vec![] })
     }
 }

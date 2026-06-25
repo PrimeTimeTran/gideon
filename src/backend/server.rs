@@ -4,7 +4,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::tool::AddVars;
+use crate::backend::tool::AddVars;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct CodeReviewArgs {
@@ -14,7 +14,7 @@ pub struct CodeReviewArgs {
     pub focus_areas: Option<Vec<String>>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct MyServer;
 
 #[tool_router(server_handler)]
@@ -73,42 +73,3 @@ impl MyServer {
         Ok(result)
     }
 }
-// #[tool_router]
-// impl MyServer {
-// #[rmcp::tool(description = "Add two numbers")]
-// pub fn add(&self, Parameters(args): Parameters<AddVars>) -> String {
-//     (args.a + args.b).to_string()
-// }
-// }
-// #[prompt_handler]
-// impl ServerHandler for MyServer {
-//     fn get_info(&self) -> ServerInfo {
-//         let mut handler = ServerInfo::default();
-//         handler.capabilities = ServerCapabilities::builder()
-//             .enable_resources()
-//             .enable_tools()
-//             .build();
-//         handler
-//     }
-//     async fn list_tools(
-//         &self,
-//         params: Option<PaginatedRequestParams>,
-//         ctx: RequestContext<RoleServer>,
-//     ) -> Result<ListToolsResult, McpError> {
-//         self.tool_router.list_all();
-//         return Ok(ListToolsResult::default());
-//     }
-
-//     async fn list_prompts(
-//         &self,
-//         params: Option<PaginatedRequestParams>,
-//         ctx: RequestContext<RoleServer>,
-//     ) -> Result<ListPromptsResult, McpError> {
-//         self.prompt_router.list_all();
-//         return Ok(ListPromptsResult::default());
-//     }
-// }
-// #[prompt_handler]
-// impl ServerHandler for MyServer {
-
-// }

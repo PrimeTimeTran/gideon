@@ -12,16 +12,6 @@ pub enum TaskStatus {
 }
 
 #[derive(Debug, Clone)]
-pub enum TaskEvent {
-    Thinking,
-    Started,
-    Log(String),
-    Working(String),
-    Finished(String),
-    Error(String),
-}
-
-#[derive(Debug, Clone)]
 pub struct TaskResult {
     pub task_id: String,
     pub status: TaskStatus,

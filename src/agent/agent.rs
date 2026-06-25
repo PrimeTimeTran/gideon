@@ -1,12 +1,10 @@
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::{sync::Arc, time::SystemTime};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
+use vfs::fs;
 
 use crate::agent::{
-    AgentRegistry, AgentRuntime, AgentTools, Artifact, RuntimeEvent, SystemEvent, Task, TaskEvent,
-    TaskResult, TaskStatus, WorkspaceContext,
+    AgentEvent, AgentTools, Artifact, RuntimeEvent, Task, TaskResult, TaskStatus, WorkspaceContext,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -14,10 +12,20 @@ pub struct LlmMode {
     pub mode: String,
 }
 
-enum AgentMode {
+#[derive(Debug)]
+pub enum AgentMode {
     Chat,
     Tool,
 }
+
+#[derive(PartialEq, Clone)]
+pub enum AgentStatus {
+    Done,
+    Waiting,
+    Thinking,
+    Error(String),
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct LlmAction {
     pub action: String,
@@ -53,6 +61,7 @@ impl AgentContext {
 pub enum AgentObservation {
     ReadFile { path: String, content: String },
     WriteFile { path: String, success: bool },
+    Current { message: String },
 }
 
 #[derive(Clone, Debug)]
@@ -80,6 +89,9 @@ pub enum AgentAction {
 
     #[serde(rename = "finish")]
     Finish { message: String },
+
+    #[serde(rename = "current")]
+    Current { message: String },
 }
 
 impl TryFrom<LlmAction> for AgentAction {
@@ -98,6 +110,10 @@ impl TryFrom<LlmAction> for AgentAction {
                     .ok_or_else(|| anyhow::anyhow!("missing content"))?,
             }),
 
+            "current" => Ok(Self::Current {
+                message: v.message.unwrap_or_default(),
+            }),
+
             "finish" => Ok(Self::Finish {
                 message: v.message.unwrap_or_default(),
             }),
@@ -105,15 +121,6 @@ impl TryFrom<LlmAction> for AgentAction {
             other => Err(anyhow::anyhow!("unknown action: {}", other)),
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
-    NewTask { task: Task },
-    Thinking { task: Task },
-    Working { task: Task, message: String },
-    Finished { result: TaskResult },
-    TaskEvent { task: Task, event: TaskEvent },
 }
 
 #[derive(Debug, Clone)]
@@ -145,13 +152,15 @@ impl Agent {
         task: Task,
         event_tx: UnboundedSender<RuntimeEvent>,
     ) -> anyhow::Result<TaskResult> {
+        let mut steps = 0;
+        let max_steps = 10;
         let mut ctx = AgentContext::new(task.prompt.clone());
         let _ = event_tx.send(RuntimeEvent::Agent(AgentEvent::Thinking {
             task: task.clone(),
         }));
-        let mode = decide_mode(&ctx).await?;
+        let mode: AgentMode = self.decide_mode(&ctx).await?;
         if matches!(mode, AgentMode::Chat) {
-            let response = generate_chat_response(&ctx).await?;
+            let response = prompt_chat(&ctx).await?;
             let result = TaskResult {
                 task_id: task.id.clone(),
                 status: TaskStatus::Completed,
@@ -169,9 +178,37 @@ impl Agent {
             return Ok(result);
         }
         loop {
-            let action = decide_next_action(&ctx).await?;
+            steps += 1;
+
+            if steps > max_steps {
+                return Ok(TaskResult {
+                    task_id: task.id,
+                    status: TaskStatus::Failed("Infinite loop".to_string()),
+                    summary: Some("Agent exceeded maximum reasoning steps".into()),
+                    artifacts: ctx.artifacts,
+                    logs: ctx.logs,
+                    spawned_tasks: ctx.spawned_tasks,
+                    chat: None,
+                });
+            }
+            let action = self.decide_next_action(&ctx).await?;
 
             match action {
+                AgentAction::Current { message } => {
+                    let now = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+                    let response =
+                        format!("Context update: The current date is {}. {}", now, message);
+
+                    let _ = event_tx.send(RuntimeEvent::Agent(AgentEvent::Working {
+                        task: task.clone(),
+                        message: response.clone(),
+                    }));
+
+                    ctx.history
+                        .push(AgentObservation::Current { message: response });
+                }
+
                 AgentAction::ReadFile { path } => {
                     let _ = event_tx.send(RuntimeEvent::Agent(AgentEvent::Working {
                         task: task.clone(),
@@ -216,16 +253,41 @@ impl Agent {
             }
         }
     }
+    async fn decide_mode(&self, ctx: &AgentContext) -> anyhow::Result<AgentMode> {
+        let prompt = format!(
+            r#"
+            You are a router.
+
+            Decide if this request needs tools or is chat only.
+
+            USER:
+            {}
+
+            Return JSON:
+            {{
+                "mode": "chat" | "tool"
+            }}
+            "#,
+            ctx.prompt
+        );
+
+        let raw: LlmMode = prompt_ollama_json(&prompt).await?;
+
+        Ok(match raw.mode.as_str() {
+            "tool" => AgentMode::Tool,
+            _ => AgentMode::Chat,
+        })
+    }
+
+    async fn decide_next_action(&self, ctx: &AgentContext) -> anyhow::Result<AgentAction> {
+        let prompt = build_prompt(ctx);
+        let raw = build_action(&prompt).await?;
+        let action = AgentAction::try_from(raw)?;
+        Ok(action)
+    }
 }
 
-async fn decide_next_action(ctx: &AgentContext) -> anyhow::Result<AgentAction> {
-    let prompt = build_prompt(ctx);
-    let raw: LlmAction = prompt_ollama_for_json(&prompt).await?;
-    let action = AgentAction::try_from(raw)?;
-    Ok(action)
-}
-
-pub fn build_prompt(ctx: &AgentContext) -> String {
+fn build_prompt(ctx: &AgentContext) -> String {
     format!(
         r#"
             You are an agent that MUST output a single JSON object.
@@ -284,30 +346,17 @@ pub fn build_prompt(ctx: &AgentContext) -> String {
     )
 }
 
-fn format_workspace(workspace: &WorkspaceContext) -> String {
-    let mut output = String::new();
-
-    for file in &workspace.files {
-        output.push_str(&format!("\n--- {} ---\n{}\n", file.path, file.content));
-    }
-
-    output
-}
-fn format_history(history: &[AgentObservation]) -> String {
-    serde_json::to_string_pretty(history).unwrap_or_else(|_| "[]".to_string())
-}
-
-pub async fn prompt_ollama_for_json(prompt: &str) -> anyhow::Result<LlmAction> {
+async fn build_action(prompt: &str) -> anyhow::Result<LlmAction> {
     let client = reqwest::Client::new();
 
     let system_prompt = r#"
-You are a strict JSON generator.
+        You are a strict JSON generator.
 
-You must output ONLY valid JSON.
-No markdown.
-No explanation.
-No extra text.
-"#;
+        You must output ONLY valid JSON.
+        No markdown.
+        No explanation.
+        No extra text.
+        "#;
 
     let payload = serde_json::json!({
         "model": "qwen3:8b",
@@ -332,123 +381,20 @@ No extra text.
     Ok(raw)
 }
 
-pub async fn prompt_ollama(input: &str) -> anyhow::Result<AgentCommand> {
-    let client = Client::new();
-    let url = "http://localhost:11434/api/generate";
+fn format_workspace(workspace: &WorkspaceContext) -> String {
+    let mut output = String::new();
 
-    let system_instructions = r#"
-        You are a JSON-only API. Respond ONLY with a valid JSON object matching one of these:
-        {"type": "WriteFile", "data": {"path": "...", "content": "..."}}
-        {"type": "ReadFile", "data": {"path": "..."}}
-        {"type": "Chat", "data": {"message": "..."}}
-    "#;
-
-    let payload = json!({
-        "model": "qwen3:8b",
-        "prompt": format!("{}\nUser Request: {}", system_instructions, input),
-        "stream": false,
-        "format": "json"
-    });
-
-    let res = client
-        .post(url)
-        .json(&payload)
-        .send()
-        .await?
-        .json::<OllamaResponse>()
-        .await?;
-    let command: AgentCommand = serde_json::from_str(&res.response)?;
-
-    Ok(command)
-}
-
-#[derive(Debug, Clone)]
-pub struct FileInfo {
-    pub inode: String,
-    pub content: String,
-    /// Human-readable location
-    pub path: String,
-    pub name: String,
-    pub extension: Option<String>,
-    pub size: u64,
-    pub language: Option<String>,
-    pub is_directory: bool,
-    pub modified_at: Option<SystemTime>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OllamaResponse {
-    done: bool,
-    model: String,
-    response: String,
-}
-
-pub fn new_agent_system() -> (AgentBus, AgentRuntime, UnboundedReceiver<RuntimeEvent>) {
-    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
-
-    let bus = AgentBus {
-        tx: cmd_tx,
-        event_tx: event_tx.clone(),
-    };
-
-    let runtime = AgentRuntime {
-        cmd_rx,
-        event_tx,
-        registry: AgentRegistry::default(),
-    };
-
-    (bus, runtime, event_rx)
-}
-
-pub async fn run_agent_manager(mut runtime: AgentRuntime) {
-    while let Some(cmd) = runtime.cmd_rx.recv().await {
-        handle_event(cmd, &runtime).await;
+    for file in &workspace.files {
+        output.push_str(&format!("\n--- {} ---\n{}\n", file.path, file.content));
     }
+
+    output
 }
-pub async fn handle_event(event: AgentEvent, runtime: &AgentRuntime) {
-    match event {
-        AgentEvent::NewTask { task } => {
-            runtime.spawn_agent(task).await;
-        }
-
-        AgentEvent::Finished { result } => {
-            let _ = runtime
-                .event_tx
-                .send(RuntimeEvent::System(SystemEvent::TaskCompleted { result }));
-        }
-
-        _ => {}
-    }
+fn format_history(history: &[AgentObservation]) -> String {
+    serde_json::to_string_pretty(history).unwrap_or_else(|_| "[]".to_string())
 }
 
-pub async fn decide_mode(ctx: &AgentContext) -> anyhow::Result<AgentMode> {
-    let prompt = format!(
-        r#"
-            You are a router.
-
-            Decide if this request needs tools or is chat only.
-
-            USER:
-            {}
-
-            Return JSON:
-            {{
-            "mode": "chat" | "tool"
-            }}
-            "#,
-        ctx.prompt
-    );
-
-    let raw: LlmMode = prompt_ollama_json(&prompt).await?;
-
-    Ok(match raw.mode.as_str() {
-        "tool" => AgentMode::Tool,
-        _ => AgentMode::Chat,
-    })
-}
-
-pub async fn generate_chat_response(ctx: &AgentContext) -> anyhow::Result<String> {
+pub async fn prompt_chat(ctx: &AgentContext) -> anyhow::Result<String> {
     let prompt = format!(
         r#"
             You are a helpful assistant.
@@ -465,58 +411,49 @@ pub async fn generate_chat_response(ctx: &AgentContext) -> anyhow::Result<String
         format_history(&ctx.history)
     );
 
-    let res = prompt_ollama_for_text(&prompt).await?;
-    Ok(res)
+    let result = ollama_generate(&prompt, None, false).await?;
+    Ok(result)
 }
 
-pub async fn prompt_ollama_for_text(prompt: &str) -> anyhow::Result<String> {
-    let client = reqwest::Client::new();
-
-    let payload = serde_json::json!({
-        "model": "qwen3:8b",
-        "system": "You are a helpful assistant.",
-        "prompt": prompt,
-        "stream": false
-        // ❌ NO "format": "json"
-    });
-
-    let res = client
-        .post("http://localhost:11434/api/generate")
-        .json(&payload)
-        .send()
-        .await?
-        .json::<serde_json::Value>()
-        .await?;
-
-    let text = res["response"].as_str().unwrap_or("").to_string();
-
-    Ok(text)
-}
 pub async fn prompt_ollama_json<T>(prompt: &str) -> anyhow::Result<T>
 where
-    T: serde::de::DeserializeOwned,
+    T: DeserializeOwned,
 {
+    let result = ollama_generate(prompt, Some("You are a helpful assistant"), true).await?;
+    Ok(serde_json::from_str(&result)?)
+}
+
+pub async fn ollama_generate(
+    prompt: &str,
+    system: Option<&str>,
+    json: bool,
+) -> anyhow::Result<String> {
     let client = reqwest::Client::new();
 
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "model": "qwen3:8b",
-        "system": "Return ONLY valid JSON.",
         "prompt": prompt,
         "stream": false,
-        "format": "json"
     });
 
-    let res = client
+    if let Some(sys_msg) = system {
+        payload["system"] = serde_json::json!(sys_msg);
+    }
+
+    if json {
+        payload["format"] = serde_json::json!("json");
+    }
+
+    let response = client
         .post("http://localhost:11434/api/generate")
         .json(&payload)
         .send()
-        .await?
-        .json::<serde_json::Value>()
         .await?;
 
-    let response_text = res["response"].as_str().unwrap_or("{}");
+    let res: serde_json::Value = response.json().await?;
 
-    let parsed: T = serde_json::from_str(response_text)?;
-
-    Ok(parsed)
+    res["response"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse response field from Ollama"))
 }

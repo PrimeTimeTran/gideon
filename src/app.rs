@@ -1,92 +1,19 @@
 use crate::{
-    agent::{AgentBus, AgentEvent, RuntimeEvent, SystemEvent, Task, TaskEvent, TaskResult},
+    agent::{
+        AgentBus, AgentEvent, AgentStatus, RuntimeEvent, SystemEvent, Task, TaskEvent, TaskResult,
+    },
     logger::Logger,
-    ui::{UiState, render_ui},
+    ui::UiState,
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
-
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, widgets::ListState};
+use ratatui::{layout::Rect, widgets::ListState};
 use std::{
-    io::{self, Stdout, Write},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    io::Write,
+    sync::{Arc, atomic::AtomicBool},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::mpsc::UnboundedReceiver;
-
-pub struct Runner {
-    pub terminal: Terminal<CrosstermBackend<Stdout>>,
-    _guard: TerminalGuard,
-    pub should_exit: Arc<AtomicBool>,
-}
-
-impl Runner {
-    pub fn new() -> Self {
-        let should_exit = Arc::new(AtomicBool::new(false));
-        let q = should_exit.clone();
-        tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            q.store(true, Ordering::SeqCst);
-        });
-        std::panic::set_hook(Box::new(|info| {
-            ratatui::restore();
-            eprintln!("Panic occurred: {:?}", info);
-        }));
-
-        let _guard: TerminalGuard = TerminalGuard;
-        let terminal = ratatui::init();
-        Self {
-            terminal,
-            _guard,
-            should_exit: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    pub async fn run(&mut self, mut app: App) -> io::Result<()> {
-        let _guard = &self._guard;
-        loop {
-            if self.should_exit.load(Ordering::SeqCst) || app.should_exit.load(Ordering::SeqCst) {
-                break;
-            }
-            app.tick();
-            if event::poll(std::time::Duration::from_millis(150))? {
-                match app.handle_events() {
-                    Ok(false) => {
-                        app.handle_exit();
-                        break;
-                    }
-                    Err(_) => {
-                        app.handle_exit();
-                        break;
-                    }
-                    Ok(true) => {}
-                }
-            }
-            self.terminal.draw(|f| {
-                render_ui(f, &mut app);
-            })?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-pub enum AppMode {
-    Normal,
-    Command,
-    Editing,
-    LeaderPending,
-}
-#[derive(PartialEq, Clone)]
-pub enum AgentMode {
-    Done,
-    Waiting,
-    Thinking,
-    Error(String),
-}
 
 #[derive(Clone)]
 pub struct KeyConfig {
@@ -108,10 +35,19 @@ pub struct Message {
     role: Role,
     content: String,
 }
+
 #[derive(PartialEq, Clone)]
 enum Role {
     User,
     AI,
+}
+
+#[derive(Clone)]
+pub enum AppMode {
+    Normal,
+    Command,
+    Editing,
+    LeaderPending,
 }
 
 pub struct App {
@@ -139,7 +75,7 @@ pub struct App {
     pub messages: Vec<Message>,
 
     pub mode: AppMode,
-    pub agent_mode: AgentMode,
+    pub agent_status: AgentStatus,
     pub spinner_index: usize,
     pub agent_bus: AgentBus,
     pub rx: UnboundedReceiver<RuntimeEvent>,
@@ -184,7 +120,7 @@ impl App {
             messages: Vec::new(),
             logs: Vec::new(),
             mode: AppMode::Normal,
-            agent_mode: AgentMode::Waiting,
+            agent_status: AgentStatus::Waiting,
             cursor_visible: true,
             last_cursor_toggle: std::time::Instant::now(),
         }
@@ -196,15 +132,12 @@ impl App {
     fn prev_tab(&mut self) {
         self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
     }
-    // fn perform_special_quit(&mut self) {
-    //     self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
-    // }
 
     fn history_mode(&mut self) {
         self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
     }
 
-    fn handle_exit(&self) {
+    pub fn handle_exit(&self) {
         println!("Exiting");
         ratatui::restore();
         print!("\x1b[?25h\x1b[0m");
@@ -236,7 +169,7 @@ impl App {
             return;
         }
 
-        self.agent_mode = AgentMode::Thinking;
+        self.agent_status = AgentStatus::Thinking;
 
         let task = Task {
             id: uuid::Uuid::new_v4().to_string(),
@@ -296,7 +229,7 @@ impl App {
             Self::apply_scroll(&mut self.user_list_state, delta);
         }
     }
-    fn handle_events(&mut self) -> anyhow::Result<bool> {
+    pub fn handle_events(&mut self) -> anyhow::Result<bool> {
         let event = event::read()?;
         if let Event::Mouse(mouse) = event {
             let pos = (mouse.column, mouse.row);
@@ -376,7 +309,7 @@ impl App {
     pub fn tick(&mut self) {
         self.update_cursor_blink();
 
-        if self.agent_mode == AgentMode::Thinking {
+        if self.agent_status == AgentStatus::Thinking {
             self.spinner_index += 1;
         }
         while let Ok(event) = self.rx.try_recv() {
@@ -429,7 +362,7 @@ impl App {
             tabs: &self.tabs,
             active_tab: self.active_tab,
             input_buffer: &self.input_buffer,
-            agent_mode: &self.agent_mode,
+            agent_status: &self.agent_status,
             spinner_index: self.spinner_index,
             cursor_visible: self.cursor_visible,
         }
@@ -442,16 +375,6 @@ impl App {
         let _ = self.logger.log_to_file("ai", &summary);
         self.ai_history.push(summary);
         self.mode = AppMode::Normal;
-        self.agent_mode = AgentMode::Done;
-    }
-}
-
-struct TerminalGuard;
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        dbg!("Quitting");
-        ratatui::restore();
-        let _ = io::stdout().flush();
+        self.agent_status = AgentStatus::Done;
     }
 }

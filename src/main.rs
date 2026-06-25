@@ -1,20 +1,17 @@
-mod agent;
-mod app;
-mod logger;
-mod ui;
-use gideon::agent::Agent;
-use gideon::app::{App, Runner};
+use gideon::{
+    Agent, App, Runner,
+    agent::{new_agent_system, run_agent_manager},
+};
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
-use gideon::agent::{new_agent_system, run_agent_manager};
-use std::io::{self};
+use std::io;
 
 #[tokio::main]
-pub async fn main() -> io::Result<()> {
+pub async fn main() -> anyhow::Result<()> {
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let mut runner = Runner::new();

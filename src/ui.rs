@@ -8,7 +8,10 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
 };
 
-use crate::app::{AgentMode, App, AppMode, Message};
+use crate::{
+    agent::AgentStatus,
+    app::{App, AppMode, Message},
+};
 
 #[derive(Clone)]
 pub struct UiState<'a> {
@@ -19,7 +22,7 @@ pub struct UiState<'a> {
     pub tabs: &'a [String],
     pub active_tab: usize,
     pub input_buffer: &'a str,
-    pub agent_mode: &'a AgentMode,
+    pub agent_status: &'a AgentStatus,
     pub spinner_index: usize,
     pub cursor_visible: bool,
     pub user_history: &'a [String],
@@ -50,7 +53,7 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
     render_history(f, app, user_area);
 
     {
-        let state = app.get_ui_data();
+        let state: UiState<'_> = app.get_ui_data();
         render_tabs(f, &state, chunks[0]);
         f.render_widget(create_hint_widget(state.clone()), chunks[2]);
         f.render_widget(create_input_widget(state), chunks[3]);
@@ -153,7 +156,7 @@ fn create_hint_widget(state: UiState<'_>) -> Paragraph<'_> {
 }
 fn create_input_widget<'a>(state: UiState) -> Paragraph<'a> {
     let spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let prefix = if state.agent_mode == &AgentMode::Thinking {
+    let prefix = if state.agent_status == &AgentStatus::Thinking {
         spinner_chars[state.spinner_index % spinner_chars.len()].to_string()
     } else if !state.input_buffer.is_empty()
         && matches!(
@@ -170,14 +173,14 @@ fn create_input_widget<'a>(state: UiState) -> Paragraph<'a> {
         Style::default().fg(Color::Yellow).bold(),
     )];
 
-    let content = if state.agent_mode == &AgentMode::Thinking {
+    let content = if state.agent_status == &AgentStatus::Thinking {
         "Thinking...".to_string()
     } else {
         state.input_buffer.to_string()
     };
 
     spans.push(Span::styled(content, Style::default().fg(Color::White)));
-    if state.agent_mode != &AgentMode::Thinking && state.cursor_visible {
+    if state.agent_status != &AgentStatus::Thinking && state.cursor_visible {
         spans.push(Span::styled("_", Style::default().fg(Color::Yellow).bold()));
     }
     let line = Line::from(spans);

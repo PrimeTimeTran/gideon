@@ -4,19 +4,10 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::agent::{Agent, AgentEvent, RuntimeEvent, SystemEvent, Task};
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct AgentRegistry {
     agents: HashMap<String, Agent>,
 }
-
-impl Default for AgentRegistry {
-    fn default() -> Self {
-        Self {
-            agents: std::collections::HashMap::new(),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct AgentRuntime {
     pub cmd_rx: UnboundedReceiver<AgentEvent>,
