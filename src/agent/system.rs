@@ -1,4 +1,4 @@
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::agent::{
     AgentBus, AgentEvent, AgentRegistry, AgentRuntime, RuntimeEvent, Task, TaskResult,
@@ -25,8 +25,8 @@ pub enum SystemEvent {
 }
 
 pub fn new_agent_system() -> (AgentBus, AgentRuntime, UnboundedReceiver<RuntimeEvent>) {
-    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
+    let (cmd_tx, cmd_rx) = unbounded_channel::<AgentEvent>();
+    let (event_tx, event_rx) = unbounded_channel::<RuntimeEvent>();
 
     let bus = AgentBus {
         tx: cmd_tx,
@@ -47,6 +47,7 @@ pub async fn run_agent_manager(mut runtime: AgentRuntime) {
         handle_event(cmd, &runtime).await;
     }
 }
+
 pub async fn handle_event(event: AgentEvent, runtime: &AgentRuntime) {
     match event {
         AgentEvent::NewTask { task } => {

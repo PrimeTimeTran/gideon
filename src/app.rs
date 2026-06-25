@@ -38,8 +38,8 @@ pub struct Message {
 
 #[derive(PartialEq, Clone)]
 enum Role {
-    User,
-    AI,
+    // User,
+    // AI,
 }
 
 #[derive(Clone)]

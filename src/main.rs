@@ -1,14 +1,14 @@
-use gideon::{
-    Agent, App, Runner,
-    agent::{new_agent_system, run_agent_manager},
-};
-
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::io;
+
+use gideon::{
+    Agent, App, Runner,
+    agent::{new_agent_system, run_agent_manager},
+};
 
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {

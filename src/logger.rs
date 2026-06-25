@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::{
     fs::{File, OpenOptions},
-    io::{self, BufRead, BufReader},
+    io::{self, BufRead, BufReader, Write},
     path::Path,
 };
 

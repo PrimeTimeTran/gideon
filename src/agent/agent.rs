@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
-use vfs::fs;
+// use vfs::fs;
 
 use crate::agent::{
     AgentEvent, AgentTools, Artifact, RuntimeEvent, Task, TaskResult, TaskStatus, WorkspaceContext,

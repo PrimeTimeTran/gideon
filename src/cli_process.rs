@@ -1,7 +1,9 @@
-use std::env;
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use std::{env, process::Stdio};
+
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::Command,
+};
 
 pub async fn run_my_ui() -> Result<(), Box<dyn std::error::Error>> {
     let exe_path = env::current_exe()?;

@@ -37,7 +37,7 @@ impl Vfs {
     }
 
     pub fn search_files(&self, query: &str) -> Result<Vec<FileInfo>, Error> {
-        dbg!("Search VFS for files matching query");
+        dbg!("Search VFS for files matching query {}", query);
 
         Ok(vec![FileInfo::default()])
     }

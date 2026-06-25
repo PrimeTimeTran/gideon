@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+// use std::collections::HashMap;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -6,7 +6,7 @@ use crate::agent::{Agent, AgentEvent, RuntimeEvent, SystemEvent, Task};
 
 #[derive(Default, Debug)]
 pub struct AgentRegistry {
-    agents: HashMap<String, Agent>,
+    // agents: HashMap<String, Agent>,
 }
 #[derive(Debug)]
 pub struct AgentRuntime {
