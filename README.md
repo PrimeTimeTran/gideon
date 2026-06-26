@@ -1,3 +1,4 @@
+🔴 PRODUCTION API
 # Gideon
 
 ![preview](./public/gideon.gif)
@@ -7,7 +8,6 @@
 
 ## Free & Open Source
 - Use whichever frontier model you want.
--
 
 # Done
 
