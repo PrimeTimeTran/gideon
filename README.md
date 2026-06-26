@@ -7,7 +7,6 @@
 
 ## Free & Open Source
 - Use whichever frontier model you want.
--
 
 # Done
 
