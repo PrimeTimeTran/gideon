@@ -20,6 +20,7 @@ tokio = "1.52.3"
 async-trait = "0.1.89"
 
 rmcp = { version = "1.7.0", features = ["client", "macros", "transport-child-process", "transport-io", "transport-streamable-http-client-unix-socket"] }
+
 anyhow = "1.0.102"
 jsonschema = "0.46.5"
 schemars = "1.2.1"

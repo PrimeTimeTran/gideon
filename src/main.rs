@@ -5,6 +5,8 @@ use crossterm::{
 };
 use std::io;
 
+pub mod prelude;
+
 use gideon::{
     Agent, App, Runner,
     agent::{new_agent_system, run_agent_manager},

@@ -1,3 +1,14 @@
+# Gideon
+
+![preview](./public/gideon.gif)
+
+`curl -fsSL https://kb-blog-primetimetran.vercel.app/static/gideon/install.sh | sh`
+
+
+## Free & Open Source
+- Use whichever frontier model you want.
+-
+
 # Done
 
 - FREE AI models
