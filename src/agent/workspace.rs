@@ -4,6 +4,7 @@ use crate::agent::FileInfo;
 pub struct WorkspaceContext {
     pub files: Vec<FileInfo>,
 }
+
 impl WorkspaceContext {
     pub fn new(files: Vec<FileInfo>) -> Self {
         Self { files }

@@ -1,5 +1,4 @@
 use colored::*;
-
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -7,26 +6,27 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
 };
-
 use crate::{
     agent::AgentStatus,
     app::{App, AppMode, Message},
 };
 
+// Notes:
+// The 'a is the lifetime of the data being borrowed, not the UiState itself.
 #[derive(Clone)]
 pub struct UiState<'a> {
+    pub active_tab: usize,
+    pub agent_status: &'a AgentStatus,
+    pub ai_history: &'a [String],
+    pub cursor_visible: bool,
+    pub history: &'a [String],
+    pub input_buffer: &'a str,
+    pub logs: &'a [String],
     pub messages: &'a [Message],
     pub mode: &'a AppMode,
-    pub history: &'a [String],
-    pub logs: &'a [String],
-    pub tabs: &'a [String],
-    pub active_tab: usize,
-    pub input_buffer: &'a str,
-    pub agent_status: &'a AgentStatus,
     pub spinner_index: usize,
-    pub cursor_visible: bool,
+    pub tabs: &'a [String],
     pub user_history: &'a [String],
-    pub ai_history: &'a [String],
 }
 
 pub fn render_ui(f: &mut Frame, app: &mut App) {
@@ -68,7 +68,6 @@ fn render_tabs(f: &mut Frame, state: &UiState, area: Rect) {
         area,
     );
 }
-
 fn render_conversation(f: &mut Frame, app: &mut App, area: Rect) {
     use textwrap::{Options, wrap};
     let width = area.width.saturating_sub(4) as usize;
@@ -185,16 +184,4 @@ fn create_input_widget<'a>(state: UiState) -> Paragraph<'a> {
     }
     let line = Line::from(spans);
     Paragraph::new(line).block(Block::default().borders(Borders::ALL).title(" Input "))
-}
-
-pub fn print_user(input: &str) {
-    println!("{}: {}", "You".blue().bold(), input);
-}
-
-pub fn print_ai(answer: &str) {
-    println!("{}: {}", "AI".green().bold(), answer);
-}
-
-pub fn print_system(msg: &str) {
-    println!("{} {}", "::".yellow(), msg.italic());
 }

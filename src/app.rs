@@ -72,30 +72,30 @@ impl App {
         combined_history.extend(history_a.clone());
 
         Self {
-            rx,
+            active_tab: 0,
             agent_bus,
-            is_initialized: false,
-            user_list_state: ListState::default(),
+            agent_status: AgentStatus::Waiting,
+            ai_area: Rect::default(),
+            ai_history: history_a,
             ai_list_state: ListState::default(),
+            cursor_visible: true,
+            history: combined_history,
+            input_buffer: String::new(),
+            is_initialized: false,
+            key_config: KeyConfig::default(),
+            last_cursor_toggle: std::time::Instant::now(),
+            logger,
+            logs: Vec::new(),
+            messages: Vec::new(),
+            mode: AppMode::Normal,
+            offset: 0,
+            rx,
+            should_exit,
             spinner_index: 0,
             tabs: vec!["Chat".into(), "Config".into(), "Logs".into()],
-            active_tab: 0,
-            should_exit,
-            key_config: KeyConfig::default(),
-            input_buffer: String::new(),
-            user_history: history_u,
-            ai_history: history_a,
-            offset: 0,
-            ai_area: Rect::default(),
             user_area: Rect::default(),
-            history: combined_history,
-            logger,
-            messages: Vec::new(),
-            logs: Vec::new(),
-            mode: AppMode::Normal,
-            agent_status: AgentStatus::Waiting,
-            cursor_visible: true,
-            last_cursor_toggle: std::time::Instant::now(),
+            user_history: history_u,
+            user_list_state: ListState::default(),
         }
     }
 }
@@ -118,6 +118,7 @@ impl App {
         print!("\x1b[?25h\x1b[0m");
         let _ = std::io::stdout().flush();
     }
+
     fn handle_command(&mut self, input: &str) {
         match input {
             ":q" => self.should_exit = Arc::new(AtomicBool::new(true)),
@@ -159,6 +160,7 @@ impl App {
 
         self.mode = AppMode::Normal;
     }
+
     pub fn handle_events(&mut self) -> anyhow::Result<bool> {
         let event = event::read()?;
         if let Event::Mouse(mouse) = event {
@@ -314,6 +316,7 @@ impl App {
             _ => {}
         }
     }
+
     fn apply_cursor_blink(&mut self) {
         if self.last_cursor_toggle.elapsed().as_millis() > 500 {
             self.cursor_visible = !self.cursor_visible;

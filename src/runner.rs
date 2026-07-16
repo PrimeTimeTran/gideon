@@ -1,5 +1,3 @@
-use crate::{app::App, ui::render_ui};
-
 use crossterm::event::{self};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{
@@ -10,10 +8,12 @@ use std::{
     },
 };
 
+use crate::{app::App, ui::render_ui};
+
 pub struct Runner {
-    pub terminal: Terminal<CrosstermBackend<Stdout>>,
     _guard: TerminalGuard,
     pub should_exit: Arc<AtomicBool>,
+    pub terminal: Terminal<CrosstermBackend<Stdout>>,
 }
 
 impl Default for Runner {
@@ -53,6 +53,7 @@ impl Runner {
             app.tick();
             if event::poll(std::time::Duration::from_millis(150))? {
                 match app.handle_events() {
+                    Ok(true) => {}
                     Ok(false) => {
                         app.handle_exit();
                         break;
@@ -61,7 +62,6 @@ impl Runner {
                         app.handle_exit();
                         break;
                     }
-                    Ok(true) => {}
                 }
             }
             self.terminal.draw(|f| {

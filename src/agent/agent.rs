@@ -45,35 +45,26 @@ impl Agent {
         let mode: AgentMode = self.decide_mode(&ctx).await?;
         if matches!(mode, AgentMode::Chat) {
             let response = prompt_chat(&ctx).await?;
-            let result = TaskResult {
-                task_id: task.id.clone(),
-                status: TaskStatus::Completed,
-                summary: None,
-                artifacts: vec![],
-                logs: vec![],
-                spawned_tasks: vec![],
-                chat: Some(response),
-            };
-
+            let result = TaskResult::completed_chat(
+                task.id,
+                ctx,
+                response,
+            );
             let _ = event_tx.send(RuntimeEvent::Agent(AgentEvent::Finished {
                 result: result.clone(),
             }));
-
             return Ok(result);
         }
         loop {
             steps += 1;
 
             if steps > max_steps {
-                return Ok(TaskResult {
-                    task_id: task.id,
-                    status: TaskStatus::Failed("Infinite loop".to_string()),
-                    summary: Some("Agent exceeded maximum reasoning steps".into()),
-                    artifacts: ctx.artifacts,
-                    logs: ctx.logs,
-                    spawned_tasks: ctx.spawned_tasks,
-                    chat: None,
-                });
+                return Ok(TaskResult::failed(
+                    task.id,
+                    ctx,
+                    "Infinite loop",
+                    Some("Agent exceeded maximum reasoning steps".into()),
+                ));
             }
             let action = self.decide_next_action(&ctx).await?;
 
@@ -83,24 +74,19 @@ impl Agent {
 
                     let response =
                         format!("Context update: The current date is {}. {}", now, message);
-
                     let _ = event_tx.send(RuntimeEvent::Agent(AgentEvent::Working {
                         task: task.clone(),
                         message: response.clone(),
                     }));
-
                     ctx.history
                         .push(AgentObservation::Current { message: response });
                 }
-
                 AgentAction::ReadFile { path } => {
                     let _ = event_tx.send(RuntimeEvent::Agent(AgentEvent::Working {
                         task: task.clone(),
                         message: format!("Reading {path}"),
                     }));
-
                     let content = self.tools.fs.read(&path)?;
-
                     ctx.history
                         .push(AgentObservation::ReadFile { path, content });
                 }
@@ -119,19 +105,16 @@ impl Agent {
                     });
                 }
                 AgentAction::Finish { message } => {
-                    let result = TaskResult {
-                        chat: None,
-                        task_id: task.id,
-                        status: TaskStatus::Completed,
-                        summary: Some(message),
-                        artifacts: ctx.artifacts,
-                        logs: ctx.logs,
-                        spawned_tasks: ctx.spawned_tasks,
-                    };
+                    let result = TaskResult::completed_with_summary(
+                        task.id,
+                        ctx,
+                        message,
+                    );
+                
                     let _ = event_tx.send(RuntimeEvent::Agent(AgentEvent::Finished {
                         result: result.clone(),
                     }));
-
+                
                     return Ok(result);
                 }
             }
@@ -320,15 +303,12 @@ pub async fn prompt_chat(ctx: &AgentContext) -> anyhow::Result<String> {
     let prompt = format!(
         r#"
             You are a helpful assistant.
-
             User request:
             {}
-
             History:
             {}
-
             Respond normally. No JSON. Just text.
-            "#,
+        "#,
         ctx.prompt,
         format_history(&ctx.history)
     );
@@ -351,29 +331,23 @@ pub async fn ollama_generate(
     json: bool,
 ) -> anyhow::Result<String> {
     let client = reqwest::Client::new();
-
     let mut payload = serde_json::json!({
         "model": "qwen3:8b",
         "prompt": prompt,
         "stream": false,
     });
-
     if let Some(sys_msg) = system {
         payload["system"] = serde_json::json!(sys_msg);
     }
-
     if json {
         payload["format"] = serde_json::json!("json");
     }
-
     let response = client
         .post("http://localhost:11434/api/generate")
         .json(&payload)
         .send()
         .await?;
-
     let res: serde_json::Value = response.json().await?;
-
     res["response"]
         .as_str()
         .map(|s| s.to_string())
