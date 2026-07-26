@@ -15,21 +15,22 @@ categories = ["virtualization","visualization","filesystem", "development-tools"
 [dependencies]
 cli = { path = "../cli" }
 vfs = { path = "../vfs" }
-clap = { workspace = true }
-tokio = { workspace = true }
-serde = { workspace = true }
-anyhow = { workspace = true }
-chrono = { workspace = true }
-colored = { workspace = true }
-ratatui = { workspace = true }
-schemars = { workspace = true }
-textwrap = { workspace = true }
-crossterm = { workspace = true }
-serde_json = { workspace = true }
-rmcp = { workspace = true }
-jsonschema = { workspace = true }
-async-trait = { workspace = true }
-ratatui-textarea = { workspace = true }
+
+clap.workspace = true
+tokio.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+colored.workspace = true
+ratatui.workspace = true
+schemars.workspace = true
+textwrap.workspace = true
+crossterm.workspace = true
+serde_json.workspace = true
+rmcp.workspace = true
+jsonschema.workspace = true
+async-trait.workspace = true
+ratatui-textarea.workspace = true
 
 uuid = {version = "1.23.3", features = ["v4"]}
 reqwest = { version = "0.13.4", features = ["json", "blocking"] }
